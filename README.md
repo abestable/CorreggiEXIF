@@ -1,152 +1,153 @@
-# Correttore Date EXIF Foto
+# EXIF Date Corrector for Photos
 
-Strumento veloce per correggere le date EXIF delle foto basandosi sul nome del file e sui file JSON di Google Foto.
+Fast tool to correct EXIF dates of photos based on filename and Google Photos JSON files.
 
-**Ottimizzato per Google Takeout**: Questo strumento è progettato specificamente per lavorare con le foto esportate da Google Foto tramite Google Takeout. Legge automaticamente i file JSON supplementari (`.supplemental-metadata.json`, `.supplemental.json`, ecc.) che Google Foto genera durante l'esportazione per recuperare le date originali delle foto.
+**Optimized for Google Takeout**: This tool is specifically designed to work with photos exported from Google Photos via Google Takeout. It automatically reads the supplemental JSON files (`.supplemental-metadata.json`, `.supplemental.json`, etc.) that Google Photos generates during export to recover the original photo dates.
 
-## Versione Rust (VELOCISSIMA! ⚡)
+## Rust Version (VERY FAST! ⚡)
 
-La versione Rust è **molto più veloce** della versione Python perché:
-- Usa librerie native Rust per leggere EXIF (no chiamate esterne a exiftool)
-- Parallelizza automaticamente con rayon (usa tutti i core della CPU)
-- È compilata, quindi molto più veloce di Python interpretato
-- Include GUI moderna con egui
+The Rust version is **much faster** than the Python version because:
+- Uses native Rust libraries to read EXIF (no external calls to exiftool)
+- Automatically parallelizes with rayon (uses all CPU cores)
+- Is compiled, so much faster than interpreted Python
+- Includes modern GUI with egui
 
-### Installazione
+### Installation
 
-1. Installa Rust (se non già installato):
+1. Install Rust (if not already installed):
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
-Oppure aggiungi questa riga al tuo `~/.bashrc` per caricarlo automaticamente:
+Or add this line to your `~/.bashrc` to load it automatically:
 ```bash
 echo 'source $HOME/.cargo/env' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-2. Verifica che Rust sia disponibile:
+2. Verify Rust is available:
 ```bash
 cargo --version
 ```
 
-Dovresti vedere qualcosa come: `cargo 1.91.1 (ed61e7d7e 2025-11-07)`
+You should see something like: `cargo 1.91.1 (ed61e7d7e 2025-11-07)`
 
-3. Rendi eseguibile lo script di build (solo la prima volta):
+3. Make the build script executable (first time only):
 ```bash
 cd /home/alberto/takeout_photo/CorreggiEXIF
 chmod +x ./build.sh
 ```
 
-4. Compila il progetto:
+4. Build the project:
 
-**Opzione A: Usa lo script di build (consigliato)**
+**Option A: Use build script (recommended)**
 ```bash
 cd /home/alberto/takeout_photo/CorreggiEXIF
 source $HOME/.cargo/env
 ./build.sh
 ```
 
-**Opzione B: Compila manualmente**
+**Option B: Build manually**
 ```bash
 cd /home/alberto/takeout_photo/CorreggiEXIF
 source $HOME/.cargo/env
 cargo build --release
 ```
 
-La prima compilazione può richiedere alcuni minuti perché scarica e compila tutte le dipendenze. Le compilazioni successive saranno molto più veloci.
+The first build may take a few minutes as it downloads and compiles all dependencies. Subsequent builds will be much faster.
 
-### Uso
+### Usage
 
-#### GUI (Interfaccia Grafica)
+#### GUI (Graphical Interface)
 
-Per avviare la GUI, esegui senza argomenti:
+To start the GUI, run without arguments:
 ```bash
 ./target/release/corrigi-exif
 ```
 
-La GUI include:
-- Tabella con colonne: Nome File, DateTimeOriginal ⭐, CreateDate, ModifyDate, Strategia
-- Pannello laterale con le 3 fasi:
-  - **Fase 1**: Selezione cartella
-  - **Fase 2**: Proposta modifiche (strategia globale, calcola proposte)
-  - **Fase 3**: Applica modifiche
-- Evidenziazione delle righe con proposte (giallo)
-- Statistiche in tempo reale
+The GUI includes:
+- Table with columns: File Name, Severity, Incongruities, DateTimeOriginal ⭐, → Proposal, CreateDate, → Proposal
+- Side panel with 3 phases:
+  - **Phase 1**: Folder selection
+  - **Phase 2**: Proposal modifications (global strategy, calculate proposals)
+  - **Phase 3**: Apply modifications
+- Highlighting of rows with proposals (orange)
+- Real-time statistics
 
-#### CLI (Riga di Comando)
+#### CLI (Command Line)
 
-Per usare la versione CLI, passa la directory come argomento:
+To use the CLI version, pass the directory as argument:
 ```bash
 ./target/release/corrigi-exif <directory>
 ```
 
-**Esempio:**
+**Example:**
 ```bash
 ./target/release/corrigi-exif "/home/alberto/takeout_photo/Takeout/Google Foto/Miglior foto_ Natura"
 ```
 
-### Strategie disponibili
+### Available Strategies
 
-- `nome_file_preferito` (default): Preferisci anno dal nome file, altrimenti usa JSON
-- `nome_file`: Usa solo anno dal nome file
-- `json`: Usa solo data dal JSON
-- `json_preferito`: Preferisci JSON, altrimenti nome file
-- `exif_attuale`: Mantieni EXIF attuale
+- `json_photo_taken` (default): Use photoTakenTime from JSON
+- `json_creation`: Use creationTime from JSON
+- `nome_file_preferito`: Prefer year from filename, otherwise use JSON
+- `nome_file`: Use only year from filename
+- `json_preferito`: Prefer JSON, otherwise filename
+- `exif_attuale`: Keep current EXIF
 
-### Output atteso (CLI)
+### Expected Output (CLI)
 
-Il programma mostrerà:
-- Quante foto ha trovato
-- Tempo impiegato per la lettura (dovrebbe essere velocissimo!)
-- Statistiche (totale, con EXIF, con proposte)
-- Prime 10 foto con proposte di modifica
+The program will show:
+- How many photos it found
+- Time taken for reading (should be very fast!)
+- Statistics (total, with EXIF, with proposals)
+- First 10 photos with modification proposals
 
 ### Troubleshooting
 
-#### Errore: "command not found: cargo"
+#### Error: "command not found: cargo"
 ```bash
 source $HOME/.cargo/env
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-#### Errore durante la compilazione
+#### Build Errors
 
-**Errore: "failed to select a version for the requirement `exif = \"^0.8\"" o `exif = \"^0.7\""`
+**Error: "failed to select a version for the requirement `exif = \"^0.8\"" or `exif = \"^0.7\""`
 ```bash
-# Questo errore significa che la libreria `exif` non esiste con quelle versioni
-# Il progetto usa `kamadak-exif` invece di `exif`
-# Se vedi questo errore, verifica che Cargo.toml usi:
+# This error means the `exif` library doesn't exist with those versions
+# The project uses `kamadak-exif` instead of `exif`
+# If you see this error, verify that Cargo.toml uses:
 #   exif = { package = "kamadak-exif", version = "0.6" }
-# invece di:
-#   exif = "0.7" o "0.8"
+# instead of:
+#   exif = "0.7" or "0.8"
 cd /home/alberto/takeout_photo/CorreggiEXIF
 cargo update
 cargo build --release
 ```
 
-**Altri errori di compilazione:**
-- Assicurati che tutte le dipendenze siano installate. Rust le scaricherà automaticamente durante la prima compilazione.
-- Se vedi errori di versione, prova: `cargo update` per aggiornare le dipendenze
+**Other build errors:**
+- Make sure all dependencies are installed. Rust will download them automatically during the first build.
+- If you see version errors, try: `cargo update` to update dependencies
 
 **Warning: "the following packages contain code that will be rejected by a future version of Rust: ashpd"**
-- Questo è un warning di compatibilità futura da una dipendenza transitiva (`ashpd`, usata da `rfd` per il file dialog)
-- Non è un errore critico e il programma funziona correttamente
-- Il warning verrà risolto quando gli autori delle librerie aggiorneranno le loro dipendenze
-- Puoi ignorarlo tranquillamente
+- This is a future compatibility warning from a transitive dependency (`ashpd`, used by `rfd` for file dialog)
+- It's not a critical error and the program works correctly
+- The warning will be resolved when library authors update their dependencies
+- You can safely ignore it
 
 ### Performance
 
-La versione Rust è **10-50x più veloce** della versione Python:
-- **Rust**: ~0.5-2 secondi per 170 foto (parallelo, librerie native)
-- **Python ottimizzato**: ~10-30 secondi per 170 foto (multiprocessing, chiamate a exiftool)
-- **Python originale**: ~60-120 secondi per 170 foto (sequenziale)
+The Rust version is **10-50x faster** than the Python version:
+- **Rust**: ~0.5-2 seconds for 170 photos (parallel, native libraries)
+- **Optimized Python**: ~10-30 seconds for 170 photos (multiprocessing, exiftool calls)
+- **Original Python**: ~60-120 seconds for 170 photos (sequential)
 
-## Versione Python (deprecata)
+## Python Version (deprecated)
 
-La versione Python è stata rimossa in favore della versione Rust che include anche la GUI ed è molto più veloce.
+The Python version has been removed in favor of the Rust version which also includes the GUI and is much faster.
 
-## Licenza
+## License
 
-Questo progetto è rilasciato sotto licenza MIT.
+This project is released under the MIT license.
