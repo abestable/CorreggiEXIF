@@ -16,7 +16,8 @@ pub struct FotoData {
     #[allow(dead_code)]
     anno_nome: Option<i32>,
     data_nome: Option<(i32, u32, u32)>, // (anno, mese, giorno)
-    data_json: Option<DateTime<Utc>>,
+    data_json: Option<DateTime<Utc>>, // photoTakenTime dal JSON
+    data_json_creation: Option<DateTime<Utc>>, // creationTime dal JSON
     exif_datetime_original: Option<DateTime<Utc>>,
     exif_create_date: Option<DateTime<Utc>>,
     exif_modify_date: Option<DateTime<Utc>>,
@@ -26,12 +27,16 @@ pub struct FotoData {
     strategia_datetime_original: String,
     strategia_create_date: String,
     strategia_modify_date: String,
+    incongruenze: Vec<String>, // Lista di incongruenze rilevate
+    gravita_incongruenza: i64, // Differenza in giorni (0 = nessuna incongruenza)
 }
 
 #[derive(Debug, Deserialize)]
 struct GooglePhotoJson {
     #[serde(rename = "photoTakenTime")]
     photo_taken_time: Option<PhotoTime>,
+    #[serde(rename = "creationTime")]
+    creation_time: Option<PhotoTime>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,13 +122,44 @@ pub fn leggi_data_json(json_path: &Path) -> Option<DateTime<Utc>> {
     let content = fs::read_to_string(json_path).ok()?;
     let json: GooglePhotoJson = serde_json::from_str(&content).ok()?;
     
+    // Preferisci photoTakenTime, altrimenti creationTime
     if let Some(photo_time) = json.photo_taken_time {
         if let Ok(timestamp) = photo_time.timestamp.parse::<i64>() {
             return DateTime::from_timestamp(timestamp, 0);
         }
     }
     
+    if let Some(creation_time) = json.creation_time {
+        if let Ok(timestamp) = creation_time.timestamp.parse::<i64>() {
+            return DateTime::from_timestamp(timestamp, 0);
+        }
+    }
+    
     None
+}
+
+pub fn leggi_data_json_completo(json_path: &Path) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+    let content = match fs::read_to_string(json_path) {
+        Ok(c) => c,
+        Err(_) => return (None, None),
+    };
+    
+    let json: GooglePhotoJson = match serde_json::from_str(&content) {
+        Ok(j) => j,
+        Err(_) => return (None, None),
+    };
+    
+    let photo_taken = json.photo_taken_time.and_then(|pt| {
+        pt.timestamp.parse::<i64>().ok()
+            .and_then(|ts| DateTime::from_timestamp(ts, 0))
+    });
+    
+    let creation = json.creation_time.and_then(|ct| {
+        ct.timestamp.parse::<i64>().ok()
+            .and_then(|ts| DateTime::from_timestamp(ts, 0))
+    });
+    
+    (photo_taken, creation)
 }
 
 pub fn leggi_exif_datetime(file_path: &Path, tag: Tag) -> Option<DateTime<Utc>> {
@@ -167,8 +203,11 @@ pub fn calcola_proposta_con_strategia(foto: &FotoData, strategia: &str) -> Optio
                 }
             }
         }
-        "json" => {
+        "json_photo_taken" => {
             return foto.data_json;
+        }
+        "json_creation" => {
+            return foto.data_json_creation;
         }
         "exif_attuale" => {
             return foto.exif_datetime_original;
@@ -185,7 +224,11 @@ pub fn calcola_proposta_con_strategia(foto: &FotoData, strategia: &str) -> Optio
             return foto.data_json;
         }
         "json_preferito" => {
+            // Preferisci photoTakenTime, altrimenti creationTime, altrimenti nome file
             if let Some(dt) = foto.data_json {
+                return Some(dt);
+            }
+            if let Some(dt) = foto.data_json_creation {
                 return Some(dt);
             }
             if let Some((anno, mese, giorno)) = foto.data_nome {
@@ -208,6 +251,101 @@ pub fn calcola_proposta(foto: &FotoData) -> Option<DateTime<Utc>> {
     calcola_proposta_con_strategia(foto, &foto.strategia_datetime_original)
 }
 
+pub fn rileva_incongruenze(foto: &FotoData) -> Vec<String> {
+    use chrono::Datelike;
+    let mut incongruenze = Vec::new();
+    
+    // Confronta EXIF DateTimeOriginal con anno nel filename
+    if let Some(exif_dt) = foto.exif_datetime_original {
+        let exif_anno = exif_dt.year();
+        
+        // Confronta con anno nel nome file
+        if let Some(anno_nome) = foto.anno_nome {
+            if exif_anno != anno_nome {
+                incongruenze.push(format!("EXIF anno {} ≠ filename anno {}", exif_anno, anno_nome));
+            }
+        }
+        
+        // Confronta con data nel JSON (photoTakenTime)
+        if let Some(json_dt) = foto.data_json {
+            let json_anno = json_dt.year();
+            let json_mese = json_dt.month();
+            let json_giorno = json_dt.day();
+            let exif_mese = exif_dt.month();
+            let exif_giorno = exif_dt.day();
+            
+            if exif_anno != json_anno || exif_mese != json_mese || exif_giorno != json_giorno {
+                incongruenze.push(format!("EXIF {} ≠ JSON photoTakenTime {}", 
+                    format!("{:04}-{:02}-{:02}", exif_anno, exif_mese, exif_giorno),
+                    format!("{:04}-{:02}-{:02}", json_anno, json_mese, json_giorno)));
+            }
+        }
+        
+        // Confronta anche con creationTime se disponibile
+        if let Some(json_creation_dt) = foto.data_json_creation {
+            let json_anno = json_creation_dt.year();
+            let json_mese = json_creation_dt.month();
+            let json_giorno = json_creation_dt.day();
+            let exif_mese = exif_dt.month();
+            let exif_giorno = exif_dt.day();
+            
+            if exif_anno != json_anno || exif_mese != json_mese || exif_giorno != json_giorno {
+                incongruenze.push(format!("EXIF {} ≠ JSON creationTime {}", 
+                    format!("{:04}-{:02}-{:02}", exif_anno, exif_mese, exif_giorno),
+                    format!("{:04}-{:02}-{:02}", json_anno, json_mese, json_giorno)));
+            }
+        }
+    } else {
+        // EXIF mancante ma abbiamo dati da filename o JSON
+        if foto.anno_nome.is_some() || foto.data_json.is_some() || foto.data_json_creation.is_some() {
+            incongruenze.push("EXIF DateTimeOriginal mancante".to_string());
+        }
+    }
+    
+    incongruenze
+}
+
+pub fn calcola_gravita_incongruenza(foto: &FotoData) -> i64 {
+    use chrono::NaiveDate;
+    
+    let mut max_diff_giorni = 0i64;
+    
+    // Confronta EXIF con data nel filename
+    if let Some(exif_dt) = foto.exif_datetime_original {
+        if let Some((anno_nome, mese_nome, giorno_nome)) = foto.data_nome {
+            // Crea una data dal filename
+            if let Some(data_nome) = NaiveDate::from_ymd_opt(anno_nome as i32, mese_nome, giorno_nome) {
+                let exif_date = exif_dt.date_naive();
+                let diff = (exif_date - data_nome).num_days().abs();
+                max_diff_giorni = max_diff_giorni.max(diff);
+            }
+        }
+        
+        // Confronta EXIF con data nel JSON photoTakenTime (più preciso)
+        if let Some(json_dt) = foto.data_json {
+            let exif_date = exif_dt.date_naive();
+            let json_date = json_dt.date_naive();
+            let diff = (exif_date - json_date).num_days().abs();
+            max_diff_giorni = max_diff_giorni.max(diff);
+        }
+        
+        // Confronta anche con creationTime se disponibile
+        if let Some(json_creation_dt) = foto.data_json_creation {
+            let exif_date = exif_dt.date_naive();
+            let json_creation_date = json_creation_dt.date_naive();
+            let diff = (exif_date - json_creation_date).num_days().abs();
+            max_diff_giorni = max_diff_giorni.max(diff);
+        }
+    } else {
+        // EXIF mancante: considera come incongruenza grave (365 giorni = 1 anno)
+        if foto.anno_nome.is_some() || foto.data_json.is_some() || foto.data_json_creation.is_some() {
+            max_diff_giorni = 365;
+        }
+    }
+    
+    max_diff_giorni
+}
+
 pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
     let nome_file = foto_path.file_name().unwrap().to_string_lossy().to_string();
     
@@ -215,7 +353,9 @@ pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
     let anno_nome = data_nome.map(|(a, _, _)| a);
     
     let json_path = trova_file_json(&foto_path);
-    let data_json = json_path.as_ref().and_then(|p| leggi_data_json(p));
+    let (data_json, data_json_creation) = json_path.as_ref()
+        .map(|p| leggi_data_json_completo(p))
+        .unwrap_or((None, None));
     
     let (exif_dt, exif_cd, exif_md) = ottieni_tutti_campi_exif(&foto_path);
     
@@ -225,6 +365,7 @@ pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
         anno_nome,
         data_nome,
         data_json,
+        data_json_creation,
         exif_datetime_original: exif_dt,
         exif_create_date: exif_cd,
         exif_modify_date: exif_md,
@@ -234,12 +375,18 @@ pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
         strategia_datetime_original: "nome_file_preferito".to_string(),
         strategia_create_date: "nome_file_preferito".to_string(),
         strategia_modify_date: "nome_file_preferito".to_string(),
+        incongruenze: Vec::new(),
+        gravita_incongruenza: 0,
     };
     
     // Calcola proposte iniziali usando le strategie di default
     foto.proposta_datetime_original = calcola_proposta_con_strategia(&foto, &foto.strategia_datetime_original);
     foto.proposta_create_date = calcola_proposta_con_strategia(&foto, &foto.strategia_create_date);
     foto.proposta_modify_date = calcola_proposta_con_strategia(&foto, &foto.strategia_modify_date);
+    
+    // Rileva incongruenze e calcola gravità
+    foto.incongruenze = rileva_incongruenze(&foto);
+    foto.gravita_incongruenza = calcola_gravita_incongruenza(&foto);
     
     foto
 }
@@ -298,7 +445,7 @@ pub fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime
     Ok(())
 }
 
-pub fn scrivi_tutti_campi_exif(foto_path: &Path, campi: &[(&str, DateTime<Utc>)]) -> Result<(), Box<dyn std::error::Error>> {
+pub fn scrivi_tutti_campi_exif(foto_path: &Path, campi: &[(&str, DateTime<Utc>)]) -> Result<(), String> {
     use std::process::Command;
     
     let mut cmd = Command::new("exiftool");
@@ -312,9 +459,12 @@ pub fn scrivi_tutti_campi_exif(foto_path: &Path, campi: &[(&str, DateTime<Utc>)]
     }
     
     cmd.arg(foto_path);
-    cmd.output()?;
+    let output = cmd.output();
     
-    Ok(())
+    match output {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Errore exiftool: {}", e)),
+    }
 }
 
 fn main() -> eframe::Result<()> {
