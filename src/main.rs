@@ -151,12 +151,18 @@ pub fn leggi_data_json_completo(json_path: &Path) -> (Option<DateTime<Utc>>, Opt
     
     let photo_taken = json.photo_taken_time.and_then(|pt| {
         pt.timestamp.parse::<i64>().ok()
-            .and_then(|ts| DateTime::from_timestamp(ts, 0))
+            .and_then(|ts| {
+                // Usa from_timestamp che preserva l'ora completa
+                DateTime::from_timestamp(ts, 0)
+            })
     });
     
     let creation = json.creation_time.and_then(|ct| {
         ct.timestamp.parse::<i64>().ok()
-            .and_then(|ts| DateTime::from_timestamp(ts, 0))
+            .and_then(|ts| {
+                // Usa from_timestamp che preserva l'ora completa
+                DateTime::from_timestamp(ts, 0)
+            })
     });
     
     (photo_taken, creation)
@@ -402,12 +408,14 @@ pub fn leggi_foto_da_directory(directory: &Path) -> Vec<FotoData> {
 pub fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime_original: bool) -> Result<(), Box<dyn std::error::Error>> {
     use std::process::Command;
     
-    let data_str = format!("{:04}:{:02}:{:02} {:02}:{:02}:00", 
+    // Includi anche i secondi nella data
+    let data_str = format!("{:04}:{:02}:{:02} {:02}:{:02}:{:02}", 
                           data.year(), data.month(), data.day(), 
-                          data.hour(), data.minute());
+                          data.hour(), data.minute(), data.second());
     
     let mut cmd = Command::new("exiftool");
     cmd.arg("-overwrite_original");
+    cmd.arg("-q"); // Quiet mode
     
     if solo_datetime_original {
         cmd.arg(format!("-DateTimeOriginal={}", data_str));
@@ -418,7 +426,13 @@ pub fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime
     }
     
     cmd.arg(foto_path);
-    cmd.output()?;
+    let output = cmd.output()?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("exiftool fallito per {}: {} {}", foto_path.display(), stderr, stdout).into());
+    }
     
     Ok(())
 }
@@ -426,13 +440,30 @@ pub fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime
 pub fn scrivi_tutti_campi_exif(foto_path: &Path, campi: &[(&str, DateTime<Utc>)]) -> Result<(), String> {
     use std::process::Command;
     
+    if campi.is_empty() {
+        return Ok(());
+    }
+    
+    // Verifica che exiftool sia disponibile
+    let exiftool_check = Command::new("exiftool").arg("-ver").output();
+    if exiftool_check.is_err() {
+        return Err("exiftool non trovato. Assicurati che sia installato e nel PATH.".to_string());
+    }
+    
     let mut cmd = Command::new("exiftool");
     cmd.arg("-overwrite_original");
+    // Non usare -q per vedere gli errori quando necessario
+    cmd.arg("-P"); // Preserve file modification date/time
+    
+    // Usa -all= per permettere la scrittura anche su file EXIF corrotti
+    // Questo è necessario per alcuni file JPG e per tutti i file RAW
+    cmd.arg("-all=");
     
     for (nome_campo, data) in campi {
-        let data_str = format!("{:04}:{:02}:{:02} {:02}:{:02}:00", 
+        // Includi anche i secondi nella data
+        let data_str = format!("{:04}:{:02}:{:02} {:02}:{:02}:{:02}", 
                               data.year(), data.month(), data.day(), 
-                              data.hour(), data.minute());
+                              data.hour(), data.minute(), data.second());
         cmd.arg(format!("-{}={}", nome_campo, data_str));
     }
     
@@ -440,8 +471,19 @@ pub fn scrivi_tutti_campi_exif(foto_path: &Path, campi: &[(&str, DateTime<Utc>)]
     let output = cmd.output();
     
     match output {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("Errore exiftool: {}", e)),
+        Ok(output_result) => {
+            if output_result.status.success() {
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&output_result.stderr);
+                let stdout = String::from_utf8_lossy(&output_result.stdout);
+                let exit_code = output_result.status.code().unwrap_or(-1);
+                Err(format!("exiftool fallito per {} (exit code {}):\nSTDOUT: {}\nSTDERR: {}", 
+                          foto_path.display(), exit_code, stdout, stderr))
+            }
+        }
+        Err(e) => Err(format!("Errore esecuzione exiftool per {}: {}", 
+                             foto_path.display(), e)),
     }
 }
 

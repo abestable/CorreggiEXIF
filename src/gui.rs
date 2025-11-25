@@ -82,6 +82,7 @@ pub struct CorrectorApp {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum ColonnaOrdinamento {
     NomeFile,
     Gravita,
@@ -250,6 +251,10 @@ impl CorrectorApp {
                         counter.0 += 1;
                     } else {
                         counter.1 += 1;
+                        // Stampa l'errore per debug
+                        if let Err(ref e) = risultato {
+                            eprintln!("Errore scrittura EXIF per {}: {}", path.display(), e);
+                        }
                     }
                     
                     risultato
