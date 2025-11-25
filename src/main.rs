@@ -18,12 +18,14 @@ pub struct FotoData {
     data_nome: Option<(i32, u32, u32)>, // (anno, mese, giorno)
     data_json: Option<DateTime<Utc>>,
     exif_datetime_original: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     exif_create_date: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     exif_modify_date: Option<DateTime<Utc>>,
     proposta_datetime_original: Option<DateTime<Utc>>,
-    strategia: String,
+    proposta_create_date: Option<DateTime<Utc>>,
+    proposta_modify_date: Option<DateTime<Utc>>,
+    strategia_datetime_original: String,
+    strategia_create_date: String,
+    strategia_modify_date: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,8 +155,8 @@ pub fn ottieni_tutti_campi_exif(foto_path: &Path) -> (Option<DateTime<Utc>>, Opt
     (datetime_original, create_date, modify_date)
 }
 
-pub fn calcola_proposta(foto: &FotoData) -> Option<DateTime<Utc>> {
-    match foto.strategia.as_str() {
+pub fn calcola_proposta_con_strategia(foto: &FotoData, strategia: &str) -> Option<DateTime<Utc>> {
+    match strategia {
         "nome_file" => {
             if let Some((anno, mese, giorno)) = foto.data_nome {
                 if let Ok(dt) = NaiveDateTime::parse_from_str(
@@ -201,6 +203,11 @@ pub fn calcola_proposta(foto: &FotoData) -> Option<DateTime<Utc>> {
     None
 }
 
+// Mantenuto per compatibilità
+pub fn calcola_proposta(foto: &FotoData) -> Option<DateTime<Utc>> {
+    calcola_proposta_con_strategia(foto, &foto.strategia_datetime_original)
+}
+
 pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
     let nome_file = foto_path.file_name().unwrap().to_string_lossy().to_string();
     
@@ -222,10 +229,17 @@ pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
         exif_create_date: exif_cd,
         exif_modify_date: exif_md,
         proposta_datetime_original: None,
-        strategia: "nome_file_preferito".to_string(),
+        proposta_create_date: None,
+        proposta_modify_date: None,
+        strategia_datetime_original: "nome_file_preferito".to_string(),
+        strategia_create_date: "nome_file_preferito".to_string(),
+        strategia_modify_date: "nome_file_preferito".to_string(),
     };
     
-    foto.proposta_datetime_original = calcola_proposta(&foto);
+    // Calcola proposte iniziali usando le strategie di default
+    foto.proposta_datetime_original = calcola_proposta_con_strategia(&foto, &foto.strategia_datetime_original);
+    foto.proposta_create_date = calcola_proposta_con_strategia(&foto, &foto.strategia_create_date);
+    foto.proposta_modify_date = calcola_proposta_con_strategia(&foto, &foto.strategia_modify_date);
     
     foto
 }
@@ -276,6 +290,25 @@ pub fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime
         cmd.arg(format!("-DateTimeOriginal={}", data_str));
         cmd.arg(format!("-CreateDate={}", data_str));
         cmd.arg(format!("-ModifyDate={}", data_str));
+    }
+    
+    cmd.arg(foto_path);
+    cmd.output()?;
+    
+    Ok(())
+}
+
+pub fn scrivi_tutti_campi_exif(foto_path: &Path, campi: &[(&str, DateTime<Utc>)]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::process::Command;
+    
+    let mut cmd = Command::new("exiftool");
+    cmd.arg("-overwrite_original");
+    
+    for (nome_campo, data) in campi {
+        let data_str = format!("{:04}:{:02}:{:02} {:02}:{:02}:00", 
+                              data.year(), data.month(), data.day(), 
+                              data.hour(), data.minute());
+        cmd.arg(format!("-{}={}", nome_campo, data_str));
     }
     
     cmd.arg(foto_path);
