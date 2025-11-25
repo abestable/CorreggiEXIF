@@ -76,6 +76,19 @@ pub struct CorrectorApp {
     soglia_gravita_giorni: f32,
     unita_gravita: UnitaGravita,
     mostra_tutte_foto: bool, // Flag per mostrare tutte le foto, anche senza incongruenze
+    // Ordinamento
+    colonna_ordinamento: Option<ColonnaOrdinamento>,
+    ordine_crescente: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ColonnaOrdinamento {
+    NomeFile,
+    Gravita,
+    Incongruenze,
+    DateTimeOriginal,
+    CreateDate,
+    ModifyDate,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -135,6 +148,8 @@ impl CorrectorApp {
             soglia_gravita_giorni: 0.0,
             unita_gravita: UnitaGravita::Giorni,
             mostra_tutte_foto: false,
+            colonna_ordinamento: None,
+            ordine_crescente: true,
         }
     }
     
@@ -630,13 +645,31 @@ impl eframe::App for CorrectorApp {
                             ui.label(gravita_text);
                             ui.visuals_mut().override_text_color = None;
                             
-                            // Incongruenze - mostra "Nessuna" se non ci sono
+                            // Incongruenze - mostra "Nessuna" se non ci sono, altrimenti rendilo cliccabile
                             let inc_text = if foto.incongruenze.is_empty() {
                                 "Nessuna".to_string()
                             } else {
                                 foto.incongruenze.join("; ")
                             };
-                            ui.label(inc_text);
+                            
+                            // Se ci sono incongruenze, rendi il testo cliccabile per aprire il JSON
+                            if !foto.incongruenze.is_empty() {
+                                let inc_response = ui.selectable_label(false, &inc_text);
+                                if inc_response.clicked() {
+                                    // Trova il file JSON corrispondente
+                                    let json_path = crate::trova_file_json(&foto.path);
+                                    if let Some(json_path) = json_path {
+                                        let json_path_clone = json_path.clone();
+                                        std::thread::spawn(move || {
+                                            let _ = std::process::Command::new("xdg-open")
+                                                .arg(&json_path_clone)
+                                                .spawn();
+                                        });
+                                    }
+                                }
+                            } else {
+                                ui.label(inc_text);
+                            }
                             
                             // DateTimeOriginal attuale
                             if let Some(dt) = foto.exif_datetime_original {
