@@ -2,6 +2,8 @@
 
 Strumento veloce per correggere le date EXIF delle foto basandosi sul nome del file e sui file JSON di Google Foto.
 
+**Ottimizzato per Google Takeout**: Questo strumento è progettato specificamente per lavorare con le foto esportate da Google Foto tramite Google Takeout. Legge automaticamente i file JSON supplementari (`.supplemental-metadata.json`, `.supplemental.json`, ecc.) che Google Foto genera durante l'esportazione per recuperare le date originali delle foto.
+
 ## Versione Rust (VELOCISSIMA! ⚡)
 
 La versione Rust è **molto più veloce** della versione Python perché:

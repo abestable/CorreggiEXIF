@@ -49,7 +49,9 @@ pub struct CorrectorApp {
     foto_list: Vec<FotoData>,
     strategia_globale: Strategia,
     solo_datetime: bool,
+    #[allow(dead_code)]
     loading: bool,
+    #[allow(dead_code)]
     loading_message: String,
     stats: String,
 }
