@@ -1,3 +1,5 @@
+mod gui;
+
 use exif::{In, Tag, Value};
 use regex::Regex;
 use serde::Deserialize;
@@ -7,7 +9,7 @@ use chrono::{DateTime, Utc, NaiveDateTime, Datelike, Timelike};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
-struct FotoData {
+pub struct FotoData {
     #[allow(dead_code)]
     path: PathBuf,
     nome_file: String,
@@ -35,7 +37,7 @@ struct PhotoTime {
     timestamp: String,
 }
 
-fn estrai_anno_da_nome(nome_file: &str) -> Option<(i32, u32, u32)> {
+pub fn estrai_anno_da_nome(nome_file: &str) -> Option<(i32, u32, u32)> {
     // Pattern: "2002_" all'inizio
     let re = Regex::new(r"^(\d{4})_").ok()?;
     if let Some(caps) = re.captures(nome_file) {
@@ -77,7 +79,7 @@ fn estrai_anno_da_nome(nome_file: &str) -> Option<(i32, u32, u32)> {
     None
 }
 
-fn trova_file_json(foto_path: &Path) -> Option<PathBuf> {
+pub fn trova_file_json(foto_path: &Path) -> Option<PathBuf> {
     let directory = foto_path.parent()?;
     let base_name = foto_path.file_stem()?.to_str()?;
     let nome_file = foto_path.file_name()?.to_str()?;
@@ -109,7 +111,7 @@ fn trova_file_json(foto_path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn leggi_data_json(json_path: &Path) -> Option<DateTime<Utc>> {
+pub fn leggi_data_json(json_path: &Path) -> Option<DateTime<Utc>> {
     let content = fs::read_to_string(json_path).ok()?;
     let json: GooglePhotoJson = serde_json::from_str(&content).ok()?;
     
@@ -122,7 +124,7 @@ fn leggi_data_json(json_path: &Path) -> Option<DateTime<Utc>> {
     None
 }
 
-fn leggi_exif_datetime(file_path: &Path, tag: Tag) -> Option<DateTime<Utc>> {
+pub fn leggi_exif_datetime(file_path: &Path, tag: Tag) -> Option<DateTime<Utc>> {
     let file = fs::File::open(file_path).ok()?;
     let mut bufreader = std::io::BufReader::new(&file);
     let exif = exif::Reader::new();
@@ -143,7 +145,7 @@ fn leggi_exif_datetime(file_path: &Path, tag: Tag) -> Option<DateTime<Utc>> {
     None
 }
 
-fn ottieni_tutti_campi_exif(foto_path: &Path) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+pub fn ottieni_tutti_campi_exif(foto_path: &Path) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
     let datetime_original = leggi_exif_datetime(foto_path, Tag::DateTimeOriginal);
     let create_date = leggi_exif_datetime(foto_path, Tag::DateTimeDigitized);
     let modify_date = leggi_exif_datetime(foto_path, Tag::DateTime);
@@ -151,7 +153,7 @@ fn ottieni_tutti_campi_exif(foto_path: &Path) -> (Option<DateTime<Utc>>, Option<
     (datetime_original, create_date, modify_date)
 }
 
-fn calcola_proposta(foto: &FotoData) -> Option<DateTime<Utc>> {
+pub fn calcola_proposta(foto: &FotoData) -> Option<DateTime<Utc>> {
     match foto.strategia.as_str() {
         "nome_file" => {
             if let Some((anno, mese, giorno)) = foto.data_nome {
@@ -199,7 +201,7 @@ fn calcola_proposta(foto: &FotoData) -> Option<DateTime<Utc>> {
     None
 }
 
-fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
+pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
     let nome_file = foto_path.file_name().unwrap().to_string_lossy().to_string();
     
     let data_nome = estrai_anno_da_nome(&nome_file);
@@ -228,7 +230,7 @@ fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
     foto
 }
 
-fn leggi_foto_da_directory(directory: &Path) -> Vec<FotoData> {
+pub fn leggi_foto_da_directory(directory: &Path) -> Vec<FotoData> {
     let estensioni = vec!["jpg", "JPG", "jpeg", "JPEG"];
     let mut foto_files = Vec::new();
     
@@ -258,8 +260,7 @@ fn leggi_foto_da_directory(directory: &Path) -> Vec<FotoData> {
     foto_list_sorted
 }
 
-#[allow(dead_code)]
-fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime_original: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime_original: bool) -> Result<(), Box<dyn std::error::Error>> {
     use std::process::Command;
     
     let data_str = format!("{:04}:{:02}:{:02} {:02}:{:02}:00", 
@@ -283,52 +284,63 @@ fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime_ori
     Ok(())
 }
 
-fn main() {
-    println!("Correttore Date EXIF - Versione Rust (VELOCISSIMA!)");
-    println!("===================================================");
-    
+fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        println!("Uso: {} <directory>", args[0]);
-        return;
-    }
     
-    let directory = Path::new(&args[1]);
-    if !directory.exists() {
-        eprintln!("Errore: directory non trovata: {}", directory.display());
-        return;
-    }
-    
-    println!("Lettura foto da: {}", directory.display());
-    let start = std::time::Instant::now();
-    
-    let foto_list = leggi_foto_da_directory(directory);
-    
-    let elapsed = start.elapsed();
-    println!("✅ Trovate {} foto in {:?} (VELOCISSIMO!)", foto_list.len(), elapsed);
-    
-    // Mostra statistiche
-    let con_exif = foto_list.iter().filter(|f| f.exif_datetime_original.is_some()).count();
-    let con_proposte = foto_list.iter().filter(|f| f.proposta_datetime_original.is_some()).count();
-    
-    println!("\n📊 Statistiche:");
-    println!("  Totale foto: {}", foto_list.len());
-    println!("  Con EXIF DateTimeOriginal: {}", con_exif);
-    println!("  Con proposte di modifica: {}", con_proposte);
-    
-    // Mostra prime 10 foto con proposte
-    if con_proposte > 0 {
-        println!("\n📋 Prime 10 foto con proposte:");
-        for foto in foto_list.iter().filter(|f| f.proposta_datetime_original.is_some()).take(10) {
-            println!("  {}", foto.nome_file);
-            if let Some(dt) = foto.exif_datetime_original {
-                println!("    EXIF attuale: {}", dt.format("%Y-%m-%d %H:%M:%S"));
-            } else {
-                println!("    EXIF attuale: ❌");
-            }
-            if let Some(dt) = foto.proposta_datetime_original {
-                println!("    Proposta: {}", dt.format("%Y-%m-%d %H:%M:%S"));
+    // Se viene passato un argomento, usa la CLI
+    if args.len() >= 2 {
+        let directory = Path::new(&args[1]);
+        if !directory.exists() {
+            eprintln!("Errore: directory non trovata: {}", directory.display());
+            return Ok(());
+        }
+        
+        println!("Correttore Date EXIF - Versione Rust (VELOCISSIMA!)");
+        println!("===================================================");
+        println!("Lettura foto da: {}", directory.display());
+        let start = std::time::Instant::now();
+        
+        let foto_list = leggi_foto_da_directory(directory);
+        
+        let elapsed = start.elapsed();
+        println!("✅ Trovate {} foto in {:?} (VELOCISSIMO!)", foto_list.len(), elapsed);
+        
+        let con_exif = foto_list.iter().filter(|f| f.exif_datetime_original.is_some()).count();
+        let con_proposte = foto_list.iter().filter(|f| f.proposta_datetime_original.is_some()).count();
+        
+        println!("\n📊 Statistiche:");
+        println!("  Totale foto: {}", foto_list.len());
+        println!("  Con EXIF DateTimeOriginal: {}", con_exif);
+        println!("  Con proposte di modifica: {}", con_proposte);
+        
+        if con_proposte > 0 {
+            println!("\n📋 Prime 10 foto con proposte:");
+            for foto in foto_list.iter().filter(|f| f.proposta_datetime_original.is_some()).take(10) {
+                println!("  {}", foto.nome_file);
+                if let Some(dt) = foto.exif_datetime_original {
+                    println!("    EXIF attuale: {}", dt.format("%Y-%m-%d %H:%M:%S"));
+                } else {
+                    println!("    EXIF attuale: ❌");
+                }
+                if let Some(dt) = foto.proposta_datetime_original {
+                    println!("    Proposta: {}", dt.format("%Y-%m-%d %H:%M:%S"));
+                }
             }
         }
+        
+        return Ok(());
     }
+    
+    // Altrimenti avvia la GUI
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1400.0, 800.0]),
+        ..Default::default()
+    };
+    
+    eframe::run_native(
+        "Correttore Date EXIF Foto",
+        options,
+        Box::new(|cc| Box::new(gui::CorrectorApp::new(cc))),
+    )
 }
