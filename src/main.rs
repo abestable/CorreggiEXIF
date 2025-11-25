@@ -266,7 +266,7 @@ pub fn rileva_incongruenze(foto: &FotoData) -> Vec<String> {
             }
         }
         
-        // Confronta con data nel JSON (photoTakenTime)
+        // Confronta con data nel JSON (photoTakenTime) - solo questo campo per il confronto
         if let Some(json_dt) = foto.data_json {
             let json_anno = json_dt.year();
             let json_mese = json_dt.month();
@@ -280,24 +280,9 @@ pub fn rileva_incongruenze(foto: &FotoData) -> Vec<String> {
                     format!("{:04}-{:02}-{:02}", json_anno, json_mese, json_giorno)));
             }
         }
-        
-        // Confronta anche con creationTime se disponibile
-        if let Some(json_creation_dt) = foto.data_json_creation {
-            let json_anno = json_creation_dt.year();
-            let json_mese = json_creation_dt.month();
-            let json_giorno = json_creation_dt.day();
-            let exif_mese = exif_dt.month();
-            let exif_giorno = exif_dt.day();
-            
-            if exif_anno != json_anno || exif_mese != json_mese || exif_giorno != json_giorno {
-                incongruenze.push(format!("EXIF {} ≠ JSON creationTime {}", 
-                    format!("{:04}-{:02}-{:02}", exif_anno, exif_mese, exif_giorno),
-                    format!("{:04}-{:02}-{:02}", json_anno, json_mese, json_giorno)));
-            }
-        }
     } else {
-        // EXIF mancante ma abbiamo dati da filename o JSON
-        if foto.anno_nome.is_some() || foto.data_json.is_some() || foto.data_json_creation.is_some() {
+        // EXIF mancante ma abbiamo dati da filename o JSON (solo photoTakenTime)
+        if foto.anno_nome.is_some() || foto.data_json.is_some() {
             incongruenze.push("EXIF DateTimeOriginal mancante".to_string());
         }
     }
@@ -321,24 +306,16 @@ pub fn calcola_gravita_incongruenza(foto: &FotoData) -> i64 {
             }
         }
         
-        // Confronta EXIF con data nel JSON photoTakenTime (più preciso)
+        // Confronta EXIF con data nel JSON photoTakenTime (solo questo campo per il confronto)
         if let Some(json_dt) = foto.data_json {
             let exif_date = exif_dt.date_naive();
             let json_date = json_dt.date_naive();
             let diff = (exif_date - json_date).num_days().abs();
             max_diff_giorni = max_diff_giorni.max(diff);
         }
-        
-        // Confronta anche con creationTime se disponibile
-        if let Some(json_creation_dt) = foto.data_json_creation {
-            let exif_date = exif_dt.date_naive();
-            let json_creation_date = json_creation_dt.date_naive();
-            let diff = (exif_date - json_creation_date).num_days().abs();
-            max_diff_giorni = max_diff_giorni.max(diff);
-        }
     } else {
         // EXIF mancante: considera come incongruenza grave (365 giorni = 1 anno)
-        if foto.anno_nome.is_some() || foto.data_json.is_some() || foto.data_json_creation.is_some() {
+        if foto.anno_nome.is_some() || foto.data_json.is_some() {
             max_diff_giorni = 365;
         }
     }
@@ -392,10 +369,11 @@ pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
 }
 
 pub fn leggi_foto_da_directory(directory: &Path) -> Vec<FotoData> {
-    let estensioni = vec!["jpg", "JPG", "jpeg", "JPEG"];
+    let estensioni = vec!["jpg", "JPG", "jpeg", "JPEG", "orf", "ORF", "nef", "NEF"];
     let mut foto_files = Vec::new();
     
-    for entry in walkdir::WalkDir::new(directory).max_depth(1) {
+    // Cerca ricorsivamente in tutte le sottocartelle
+    for entry in walkdir::WalkDir::new(directory) {
         if let Ok(entry) = entry {
             if entry.file_type().is_file() {
                 let path = entry.path();

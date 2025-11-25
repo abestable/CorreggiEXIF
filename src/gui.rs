@@ -52,6 +52,8 @@ impl Strategia {
 pub struct CorrectorApp {
     directory: Option<PathBuf>,
     foto_list: Vec<FotoData>,
+    foto_selezionate: std::collections::HashSet<usize>, // Indici delle foto selezionate
+    ultimo_indice_selezionato: Option<usize>, // Per gestire Shift+click
     strategia_datetime_original: Strategia,
     strategia_create_date: Strategia,
     strategia_modify_date: Strategia,
@@ -62,6 +64,7 @@ pub struct CorrectorApp {
     stats: String,
     // Stato per dialog di conferma
     mostra_conferma: bool,
+    foto_da_modificare_count: usize, // Numero di foto da modificare per il popup di conferma
     // Stato per barra di avanzamento
     applicando_modifiche: bool,
     foto_totali_da_modificare: usize,
@@ -114,6 +117,7 @@ impl CorrectorApp {
         Self {
             directory: None,
             foto_list: Vec::new(),
+            foto_selezionate: std::collections::HashSet::new(),
             strategia_datetime_original: Strategia::JsonPhotoTaken,
             strategia_create_date: Strategia::JsonPhotoTaken,
             strategia_modify_date: Strategia::JsonPhotoTaken,
@@ -121,6 +125,7 @@ impl CorrectorApp {
             loading_message: String::new(),
             stats: String::new(),
             mostra_conferma: false,
+            foto_da_modificare_count: 0,
             applicando_modifiche: false,
             foto_totali_da_modificare: 0,
             foto_modificate: 0,
@@ -164,14 +169,19 @@ impl CorrectorApp {
     }
     
     fn avvia_applicazione_modifiche(&mut self, _ctx: &egui::Context) {
+        // Applica modifiche solo alle foto selezionate
         let foto_da_modificare: Vec<_> = self.foto_list
             .iter()
-            .filter(|f| {
-                f.proposta_datetime_original.is_some() ||
-                f.proposta_create_date.is_some() ||
-                f.proposta_modify_date.is_some()
+            .enumerate()
+            .filter(|(idx, f)| {
+                // Deve essere selezionata E avere almeno una proposta
+                self.foto_selezionate.contains(idx) && (
+                    f.proposta_datetime_original.is_some() ||
+                    f.proposta_create_date.is_some() ||
+                    f.proposta_modify_date.is_some()
+                )
             })
-            .cloned()
+            .map(|(_, f)| f.clone())
             .collect();
         
         if foto_da_modificare.is_empty() {
@@ -263,7 +273,21 @@ impl CorrectorApp {
             
             // Rileggi le foto dopo le modifiche
             if let Some(ref dir) = self.directory {
+                // Salva i path delle foto selezionate prima di ricaricare
+                let vecchie_selezioni: Vec<_> = self.foto_selezionate.iter()
+                    .filter_map(|idx| self.foto_list.get(*idx).map(|f| f.path.clone()))
+                    .collect();
+                
                 self.foto_list = leggi_foto_da_directory(dir);
+                
+                // Ripristina le selezioni basate sul path
+                self.foto_selezionate.clear();
+                for (idx, foto) in self.foto_list.iter().enumerate() {
+                    if vecchie_selezioni.contains(&foto.path) {
+                        self.foto_selezionate.insert(idx);
+                    }
+                }
+                
                 self.aggiorna_statistiche();
             }
         }
@@ -299,16 +323,7 @@ impl eframe::App for CorrectorApp {
                     ui.label("Questa operazione modifica permanentemente i file.");
                     ui.label("");
                     
-                    let foto_da_modificare = self.foto_list
-                        .iter()
-                        .filter(|f| {
-                            f.proposta_datetime_original.is_some() ||
-                            f.proposta_create_date.is_some() ||
-                            f.proposta_modify_date.is_some()
-                        })
-                        .count();
-                    
-                    ui.label(format!("Foto da modificare: {}", foto_da_modificare));
+                    ui.label(format!("Foto da modificare: {}", self.foto_da_modificare_count));
                     ui.label("");
                     ui.label("⚠️ Assicurati di avere un backup delle foto!");
                     ui.separator();
@@ -457,14 +472,37 @@ impl eframe::App for CorrectorApp {
             } else {
                 ui.label(format!("Foto con incongruenze >= {}: {}", soglia_display, foto_da_mostrare.len()));
             }
+            
+            ui.label(format!("Foto selezionate: {}", self.foto_selezionate.len()));
             ui.separator();
             
             egui::ScrollArea::both().show(ui, |ui| {
                 egui::Grid::new("foto_grid")
-                    .num_columns(9)
+                    .num_columns(10)
                     .spacing([10.0, 4.0])
                     .show(ui, |ui| {
-                        // Header
+                        // Header con checkbox "Seleziona tutte"
+                        let tutte_selezionate = !foto_da_mostrare.is_empty() && 
+                            foto_da_mostrare.iter().all(|foto| {
+                                let idx_originale = self.foto_list.iter()
+                                    .position(|f| f.path == foto.path)
+                                    .unwrap_or(0);
+                                self.foto_selezionate.contains(&idx_originale)
+                            });
+                        let mut seleziona_tutte = tutte_selezionate;
+                        if ui.checkbox(&mut seleziona_tutte, "Seleziona").changed() {
+                            // Seleziona/deseleziona tutte le foto visibili
+                            for foto in foto_da_mostrare.iter() {
+                                let idx_originale = self.foto_list.iter()
+                                    .position(|f| f.path == foto.path)
+                                    .unwrap_or(0);
+                                if seleziona_tutte {
+                                    self.foto_selezionate.insert(idx_originale);
+                                } else {
+                                    self.foto_selezionate.remove(&idx_originale);
+                                }
+                            }
+                        }
                         ui.label("Nome File");
                         ui.label("Gravità");
                         ui.label("Incongruenze");
@@ -478,6 +516,27 @@ impl eframe::App for CorrectorApp {
                         
                         // Righe dati - foto filtrate
                         for foto in foto_da_mostrare {
+                            // Trova l'indice originale nella lista completa
+                            let idx_originale = self.foto_list.iter()
+                                .position(|f| f.path == foto.path)
+                                .unwrap_or(0);
+                            
+                            let mut is_selected = self.foto_selezionate.contains(&idx_originale);
+                            
+                            // Checkbox per selezione
+                            if ui.checkbox(&mut is_selected, "").changed() {
+                                if is_selected {
+                                    self.foto_selezionate.insert(idx_originale);
+                                } else {
+                                    self.foto_selezionate.remove(&idx_originale);
+                                }
+                            }
+                            
+                            // Evidenzia riga se selezionata
+                            if is_selected {
+                                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(100, 150, 255));
+                            }
+                            
                             // Nome file
                             ui.label(&foto.nome_file);
                             
@@ -564,6 +623,8 @@ impl eframe::App for CorrectorApp {
                                 ui.label("-");
                             }
                             
+                            // Reset colore alla fine della riga
+                            ui.visuals_mut().override_text_color = None;
                             ui.end_row();
                         }
                     });
@@ -658,21 +719,35 @@ impl eframe::App for CorrectorApp {
                 ui.label("Fase 3: Applica Modifiche");
                 ui.separator();
                 
-                ui.label("Le modifiche verranno applicate solo ai campi con proposte.");
+                ui.label("Le modifiche verranno applicate solo alle foto selezionate.");
                 ui.label("Ogni campo EXIF può avere una strategia indipendente.");
                 
+                let foto_selezionate_count = self.foto_selezionate.len();
+                if foto_selezionate_count == 0 {
+                    ui.label("⚠️ Nessuna foto selezionata!");
+                } else {
+                    ui.label(format!("✅ {} foto selezionate", foto_selezionate_count));
+                }
+                
                 if ui.button("Applica Modifiche").clicked() {
-                    let foto_da_modificare = self.foto_list
-                        .iter()
-                        .filter(|f| {
-                            f.proposta_datetime_original.is_some() ||
-                            f.proposta_create_date.is_some() ||
-                            f.proposta_modify_date.is_some()
-                        })
-                        .count();
-                    
-                    if foto_da_modificare > 0 {
-                        self.mostra_conferma = true;
+                    if foto_selezionate_count > 0 {
+                        // Calcola quante foto selezionate hanno effettivamente proposte da applicare
+                        let foto_con_proposte = self.foto_list
+                            .iter()
+                            .enumerate()
+                            .filter(|(idx, f)| {
+                                self.foto_selezionate.contains(idx) && (
+                                    f.proposta_datetime_original.is_some() ||
+                                    f.proposta_create_date.is_some() ||
+                                    f.proposta_modify_date.is_some()
+                                )
+                            })
+                            .count();
+                        
+                        if foto_con_proposte > 0 {
+                            self.foto_da_modificare_count = foto_con_proposte;
+                            self.mostra_conferma = true;
+                        }
                     }
                 }
                 
