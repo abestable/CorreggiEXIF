@@ -20,6 +20,7 @@ pub struct FotoData {
     data_json_creation: Option<DateTime<Utc>>, // creationTime dal JSON
     exif_datetime_original: Option<DateTime<Utc>>,
     exif_create_date: Option<DateTime<Utc>>,
+    #[allow(dead_code)]
     exif_modify_date: Option<DateTime<Utc>>,
     proposta_datetime_original: Option<DateTime<Utc>>,
     proposta_create_date: Option<DateTime<Utc>>,
@@ -435,7 +436,6 @@ pub fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime
     } else {
         cmd.arg(format!("-DateTimeOriginal={}", data_str));
         cmd.arg(format!("-CreateDate={}", data_str));
-        cmd.arg(format!("-ModifyDate={}", data_str));
     }
     
     cmd.arg(foto_path);

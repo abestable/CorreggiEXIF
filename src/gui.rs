@@ -56,7 +56,6 @@ pub struct CorrectorApp {
     ultimo_indice_selezionato: Option<usize>, // Per gestire Shift+click
     strategia_datetime_original: Strategia,
     strategia_create_date: Strategia,
-    strategia_modify_date: Strategia,
     #[allow(dead_code)]
     loading: bool,
     #[allow(dead_code)]
@@ -89,7 +88,6 @@ enum ColonnaOrdinamento {
     Incongruenze,
     DateTimeOriginal,
     CreateDate,
-    ModifyDate,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -135,7 +133,6 @@ impl CorrectorApp {
             ultimo_indice_selezionato: None,
             strategia_datetime_original: Strategia::JsonPhotoTaken,
             strategia_create_date: Strategia::JsonPhotoTaken,
-            strategia_modify_date: Strategia::JsonPhotoTaken,
             loading: false,
             loading_message: String::new(),
             stats: String::new(),
@@ -177,11 +174,9 @@ impl CorrectorApp {
         for foto in &mut self.foto_list {
             foto.strategia_datetime_original = self.strategia_datetime_original.as_str().to_string();
             foto.strategia_create_date = self.strategia_create_date.as_str().to_string();
-            foto.strategia_modify_date = self.strategia_modify_date.as_str().to_string();
             
             foto.proposta_datetime_original = crate::calcola_proposta_con_strategia(foto, &foto.strategia_datetime_original);
             foto.proposta_create_date = crate::calcola_proposta_con_strategia(foto, &foto.strategia_create_date);
-            foto.proposta_modify_date = crate::calcola_proposta_con_strategia(foto, &foto.strategia_modify_date);
             
             // Ricalcola incongruenze e gravità dopo aver calcolato le proposte
             foto.incongruenze = crate::rileva_incongruenze(foto);
@@ -198,8 +193,7 @@ impl CorrectorApp {
                 // Deve essere selezionata E avere almeno una proposta
                 self.foto_selezionate.contains(idx) && (
                     f.proposta_datetime_original.is_some() ||
-                    f.proposta_create_date.is_some() ||
-                    f.proposta_modify_date.is_some()
+                    f.proposta_create_date.is_some()
                 )
             })
             .map(|(_, f)| f.clone())
@@ -223,9 +217,6 @@ impl CorrectorApp {
             }
             if let Some(data) = foto.proposta_create_date {
                 campi_da_scrivere.push(("CreateDate", data));
-            }
-            if let Some(data) = foto.proposta_modify_date {
-                campi_da_scrivere.push(("ModifyDate", data));
             }
             
             (foto.path.clone(), campi_da_scrivere)
@@ -513,14 +504,6 @@ impl eframe::App for CorrectorApp {
                                 (None, None) => std::cmp::Ordering::Equal,
                             }
                         }
-                        ColonnaOrdinamento::ModifyDate => {
-                            match (a.exif_modify_date, b.exif_modify_date) {
-                                (Some(dt_a), Some(dt_b)) => dt_a.cmp(&dt_b),
-                                (Some(_), None) => std::cmp::Ordering::Less,
-                                (None, Some(_)) => std::cmp::Ordering::Greater,
-                                (None, None) => std::cmp::Ordering::Equal,
-                            }
-                        }
                     };
                     
                     if self.ordine_crescente {
@@ -552,7 +535,7 @@ impl eframe::App for CorrectorApp {
             
             egui::ScrollArea::both().show(ui, |ui| {
                 egui::Grid::new("foto_grid")
-                    .num_columns(10)
+                    .num_columns(8)
                     .spacing([10.0, 4.0])
                     .show(ui, |ui| {
                         // Header con checkbox "Seleziona tutte"
@@ -643,21 +626,6 @@ impl eframe::App for CorrectorApp {
                                 self.ordine_crescente = !self.ordine_crescente;
                             } else {
                                 self.colonna_ordinamento = Some(ColonnaOrdinamento::CreateDate);
-                                self.ordine_crescente = true;
-                            }
-                        }
-                        
-                        ui.label("→ Proposta");
-                        
-                        let md_response = ui.selectable_label(
-                            self.colonna_ordinamento == Some(ColonnaOrdinamento::ModifyDate),
-                            "ModifyDate"
-                        );
-                        if md_response.clicked() {
-                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::ModifyDate) {
-                                self.ordine_crescente = !self.ordine_crescente;
-                            } else {
-                                self.colonna_ordinamento = Some(ColonnaOrdinamento::ModifyDate);
                                 self.ordine_crescente = true;
                             }
                         }
@@ -814,8 +782,22 @@ impl eframe::App for CorrectorApp {
                             }
                             
                             // DateTimeOriginal proposta
-                            if let Some(dt) = foto.proposta_datetime_original {
-                                ui.label(format!("→ {}", dt.format("%Y-%m-%d %H:%M:%S")));
+                            if let Some(dt_proposta) = foto.proposta_datetime_original {
+                                let testo_proposta = format!("→ {}", dt_proposta.format("%Y-%m-%d %H:%M:%S"));
+                                // Confronta con EXIF attuale per decidere il colore
+                                let cambia = match foto.exif_datetime_original {
+                                    Some(dt_exif) => dt_exif != dt_proposta,
+                                    None => true, // Se EXIF mancante, consideralo come cambiamento
+                                };
+                                if cambia {
+                                    // Colore giallo/arancione per indicare modifica
+                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Arancione
+                                } else {
+                                    // Grigio se non cambia
+                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Grigio
+                                }
+                                ui.label(testo_proposta);
+                                ui.visuals_mut().override_text_color = None; // Reset
                             } else {
                                 ui.label("-");
                             }
@@ -828,22 +810,22 @@ impl eframe::App for CorrectorApp {
                             }
                             
                             // CreateDate proposta
-                            if let Some(dt) = foto.proposta_create_date {
-                                ui.label(format!("→ {}", dt.format("%Y-%m-%d %H:%M:%S")));
-                            } else {
-                                ui.label("-");
-                            }
-                            
-                            // ModifyDate attuale
-                            if let Some(dt) = foto.exif_modify_date {
-                                ui.label(dt.format("%Y-%m-%d %H:%M:%S").to_string());
-                            } else {
-                                ui.label("❌");
-                            }
-                            
-                            // ModifyDate proposta
-                            if let Some(dt) = foto.proposta_modify_date {
-                                ui.label(format!("→ {}", dt.format("%Y-%m-%d %H:%M:%S")));
+                            if let Some(dt_proposta) = foto.proposta_create_date {
+                                let testo_proposta = format!("→ {}", dt_proposta.format("%Y-%m-%d %H:%M:%S"));
+                                // Confronta con EXIF attuale per decidere il colore
+                                let cambia = match foto.exif_create_date {
+                                    Some(dt_exif) => dt_exif != dt_proposta,
+                                    None => true, // Se EXIF mancante, consideralo come cambiamento
+                                };
+                                if cambia {
+                                    // Colore giallo/arancione per indicare modifica
+                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Arancione
+                                } else {
+                                    // Grigio se non cambia
+                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Grigio
+                                }
+                                ui.label(testo_proposta);
+                                ui.visuals_mut().override_text_color = None; // Reset
                             } else {
                                 ui.label("-");
                             }
@@ -909,26 +891,6 @@ impl eframe::App for CorrectorApp {
                 
                 ui.separator();
                 
-                ui.label("Strategia ModifyDate:");
-                egui::ComboBox::from_id_source("strategia_md")
-                    .selected_text(self.strategia_modify_date.display_name())
-                    .show_ui(ui, |ui| {
-                        for strategia in [
-                            Strategia::JsonPhotoTaken,
-                            Strategia::JsonCreation,
-                            Strategia::NomeFilePreferito,
-                            Strategia::NomeFile,
-                            Strategia::JsonPreferito,
-                            Strategia::ExifAttuale,
-                        ] {
-                            if ui.selectable_value(&mut self.strategia_modify_date, strategia.clone(), strategia.display_name()).changed() {
-                                strategia_cambiata = true;
-                            }
-                        }
-                    });
-                
-                ui.separator();
-                
                 // Se una qualsiasi strategia è cambiata, ricalcola automaticamente le proposte
                 if strategia_cambiata {
                     self.calcola_proposte();
@@ -963,8 +925,7 @@ impl eframe::App for CorrectorApp {
                             .filter(|(idx, f)| {
                                 self.foto_selezionate.contains(idx) && (
                                     f.proposta_datetime_original.is_some() ||
-                                    f.proposta_create_date.is_some() ||
-                                    f.proposta_modify_date.is_some()
+                                    f.proposta_create_date.is_some()
                                 )
                             })
                             .count();
