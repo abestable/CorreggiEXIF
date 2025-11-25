@@ -118,6 +118,7 @@ impl CorrectorApp {
             directory: None,
             foto_list: Vec::new(),
             foto_selezionate: std::collections::HashSet::new(),
+            ultimo_indice_selezionato: None,
             strategia_datetime_original: Strategia::JsonPhotoTaken,
             strategia_create_date: Strategia::JsonPhotoTaken,
             strategia_modify_date: Strategia::JsonPhotoTaken,
@@ -515,7 +516,16 @@ impl eframe::App for CorrectorApp {
                         ui.end_row();
                         
                         // Righe dati - foto filtrate
-                        for foto in foto_da_mostrare {
+                        // Crea una lista di indici per gestire Shift+click
+                        let indici_visibili: Vec<usize> = foto_da_mostrare.iter()
+                            .map(|foto| {
+                                self.foto_list.iter()
+                                    .position(|f| f.path == foto.path)
+                                    .unwrap_or(0)
+                            })
+                            .collect();
+                        
+                        for (idx_grid, foto) in foto_da_mostrare.iter().enumerate() {
                             // Trova l'indice originale nella lista completa
                             let idx_originale = self.foto_list.iter()
                                 .position(|f| f.path == foto.path)
@@ -523,13 +533,50 @@ impl eframe::App for CorrectorApp {
                             
                             let mut is_selected = self.foto_selezionate.contains(&idx_originale);
                             
-                            // Checkbox per selezione
-                            if ui.checkbox(&mut is_selected, "").changed() {
-                                if is_selected {
-                                    self.foto_selezionate.insert(idx_originale);
+                            // Checkbox per selezione con gestione Ctrl/Shift
+                            let checkbox_response = ui.checkbox(&mut is_selected, "");
+                            
+                            if checkbox_response.changed() {
+                                let input = ui.input(|i| i.clone());
+                                let ctrl_pressed = input.modifiers.ctrl;
+                                let shift_pressed = input.modifiers.shift;
+                                
+                                if shift_pressed && self.ultimo_indice_selezionato.is_some() {
+                                    // Shift+click: seleziona range
+                                    let ultimo_idx = self.ultimo_indice_selezionato.unwrap();
+                                    let start_idx = indici_visibili.iter().position(|&i| i == ultimo_idx).unwrap_or(0);
+                                    let end_idx = idx_grid;
+                                    let (start, end) = if start_idx < end_idx {
+                                        (start_idx, end_idx)
+                                    } else {
+                                        (end_idx, start_idx)
+                                    };
+                                    
+                                    for i in start..=end {
+                                        if let Some(&idx) = indici_visibili.get(i) {
+                                            self.foto_selezionate.insert(idx);
+                                        }
+                                    }
+                                    self.ultimo_indice_selezionato = Some(idx_originale);
+                                } else if ctrl_pressed {
+                                    // Ctrl+click: aggiungi/rimuovi singola foto
+                                    if is_selected {
+                                        self.foto_selezionate.insert(idx_originale);
+                                    } else {
+                                        self.foto_selezionate.remove(&idx_originale);
+                                    }
+                                    self.ultimo_indice_selezionato = Some(idx_originale);
                                 } else {
-                                    self.foto_selezionate.remove(&idx_originale);
+                                    // Click normale: seleziona solo questa foto
+                                    self.foto_selezionate.clear();
+                                    self.foto_selezionate.insert(idx_originale);
+                                    self.ultimo_indice_selezionato = Some(idx_originale);
                                 }
+                            } else if is_selected {
+                                // Mantieni lo stato selezionato
+                                self.foto_selezionate.insert(idx_originale);
+                            } else {
+                                self.foto_selezionate.remove(&idx_originale);
                             }
                             
                             // Evidenzia riga se selezionata
@@ -537,8 +584,18 @@ impl eframe::App for CorrectorApp {
                                 ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(100, 150, 255));
                             }
                             
-                            // Nome file
-                            ui.label(&foto.nome_file);
+                            // Nome file - rendilo cliccabile per doppio click
+                            let nome_response = ui.selectable_label(false, &foto.nome_file);
+                            
+                            // Gestione doppio click sul nome file per aprire la foto
+                            if nome_response.double_clicked() {
+                                let foto_path = foto.path.clone();
+                                std::thread::spawn(move || {
+                                    let _ = std::process::Command::new("xdg-open")
+                                        .arg(&foto_path)
+                                        .spawn();
+                                });
+                            }
                             
                             // Gravità con scala termometrica
                             let giorni_diff = foto.gravita_incongruenza;
