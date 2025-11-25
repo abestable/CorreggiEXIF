@@ -3,18 +3,22 @@ use regex::Regex;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Utc, NaiveDateTime};
+use chrono::{DateTime, Utc, NaiveDateTime, Datelike, Timelike};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
 struct FotoData {
+    #[allow(dead_code)]
     path: PathBuf,
     nome_file: String,
+    #[allow(dead_code)]
     anno_nome: Option<i32>,
     data_nome: Option<(i32, u32, u32)>, // (anno, mese, giorno)
     data_json: Option<DateTime<Utc>>,
     exif_datetime_original: Option<DateTime<Utc>>,
+    #[allow(dead_code)]
     exif_create_date: Option<DateTime<Utc>>,
+    #[allow(dead_code)]
     exif_modify_date: Option<DateTime<Utc>>,
     proposta_datetime_original: Option<DateTime<Utc>>,
     strategia: String,
@@ -121,10 +125,10 @@ fn leggi_data_json(json_path: &Path) -> Option<DateTime<Utc>> {
 fn leggi_exif_datetime(file_path: &Path, tag: Tag) -> Option<DateTime<Utc>> {
     let file = fs::File::open(file_path).ok()?;
     let mut bufreader = std::io::BufReader::new(&file);
-    let exifreader = exif::Reader::new();
-    let exif = exifreader.read_from_container(&mut bufreader).ok()?;
+    let exif = exif::Reader::new();
+    let exif_data = exif.read_from_container(&mut bufreader).ok()?;
     
-    if let Some(field) = exif.get_field(tag, In::PRIMARY) {
+    if let Some(field) = exif_data.get_field(tag, In::PRIMARY) {
         if let Value::Ascii(ref vec) = field.value {
             if !vec.is_empty() {
                 let date_str = String::from_utf8_lossy(&vec[0]);
@@ -254,6 +258,7 @@ fn leggi_foto_da_directory(directory: &Path) -> Vec<FotoData> {
     foto_list_sorted
 }
 
+#[allow(dead_code)]
 fn scrivi_exif_datetime(foto_path: &Path, data: DateTime<Utc>, solo_datetime_original: bool) -> Result<(), Box<dyn std::error::Error>> {
     use std::process::Command;
     

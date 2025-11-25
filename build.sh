@@ -1,6 +1,11 @@
 #!/bin/bash
 # Script per compilare il progetto Rust
 
+# Carica l'ambiente Rust se disponibile
+if [ -f "$HOME/.cargo/env" ]; then
+    source "$HOME/.cargo/env"
+fi
+
 export PATH="$HOME/.cargo/bin:$PATH"
 
 if ! command -v cargo &> /dev/null; then
@@ -10,6 +15,12 @@ if ! command -v cargo &> /dev/null; then
 fi
 
 echo "Compilazione in corso..."
+
+# Aggiorna le dipendenze prima di compilare
+echo "Aggiornamento dipendenze..."
+cargo update
+
+# Compila
 cargo build --release
 
 if [ $? -eq 0 ]; then
