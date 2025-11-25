@@ -3,6 +3,11 @@ name = "corrigi-exif"
 version = "0.1.0"
 edition = "2021"
 
+[lints.rust]
+# Sopprime warning di compatibilità futura da dipendenze transitive
+# (ashpd è una dipendenza di rfd per il file dialog)
+unused = "warn"
+
 [dependencies]
 exif = { package = "kamadak-exif", version = "0.6" }
 serde = { version = "1.0", features = ["derive"] }

@@ -130,6 +130,12 @@ cargo build --release
 - Assicurati che tutte le dipendenze siano installate. Rust le scaricherà automaticamente durante la prima compilazione.
 - Se vedi errori di versione, prova: `cargo update` per aggiornare le dipendenze
 
+**Warning: "the following packages contain code that will be rejected by a future version of Rust: ashpd"**
+- Questo è un warning di compatibilità futura da una dipendenza transitiva (`ashpd`, usata da `rfd` per il file dialog)
+- Non è un errore critico e il programma funziona correttamente
+- Il warning verrà risolto quando gli autori delle librerie aggiorneranno le loro dipendenze
+- Puoi ignorarlo tranquillamente
+
 ### Performance
 
 La versione Rust è **10-50x più veloce** della versione Python:

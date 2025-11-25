@@ -103,18 +103,20 @@ impl CorrectorApp {
         }
         
         let solo_dt = self.solo_datetime;
-        let mut successi = 0;
-        let mut errori = 0;
+        let mut _successi = 0;
+        let mut _errori = 0;
         
         for foto in &foto_da_modificare {
             if let Some(data) = foto.proposta_datetime_original {
                 if scrivi_exif_datetime(&foto.path, data, solo_dt).is_ok() {
-                    successi += 1;
+                    _successi += 1;
                 } else {
-                    errori += 1;
+                    _errori += 1;
                 }
             }
         }
+        
+        // TODO: Mostrare messaggio di successo/errore all'utente nella GUI
         
         // Rileggi le foto dopo le modifiche
         if let Some(ref dir) = self.directory {
