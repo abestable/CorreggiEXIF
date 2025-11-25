@@ -445,7 +445,7 @@ impl eframe::App for CorrectorApp {
             
             // Tabella foto - filtra in base al flag e alla soglia
             let soglia_secondi = (self.soglia_gravita_giorni * 86400.0) as i64;
-            let foto_da_mostrare: Vec<_> = if self.mostra_tutte_foto {
+            let mut foto_da_mostrare: Vec<_> = if self.mostra_tutte_foto {
                 // Mostra tutte le foto, ma filtra per soglia se ci sono incongruenze
                 self.foto_list
                     .iter()
@@ -457,6 +457,7 @@ impl eframe::App for CorrectorApp {
                         let gravita_secondi = (f.gravita_incongruenza as f64 * 86400.0) as i64;
                         gravita_secondi >= soglia_secondi
                     })
+                    .cloned()
                     .collect()
             } else {
                 // Mostra solo quelle con incongruenze che superano la soglia
@@ -470,8 +471,56 @@ impl eframe::App for CorrectorApp {
                         let gravita_secondi = (f.gravita_incongruenza as f64 * 86400.0) as i64;
                         gravita_secondi >= soglia_secondi
                     })
+                    .cloned()
                     .collect()
             };
+            
+            // Applica ordinamento se selezionato
+            if let Some(colonna) = self.colonna_ordinamento {
+                foto_da_mostrare.sort_by(|a, b| {
+                    let cmp = match colonna {
+                        ColonnaOrdinamento::NomeFile => {
+                            a.nome_file.cmp(&b.nome_file)
+                        }
+                        ColonnaOrdinamento::Gravita => {
+                            a.gravita_incongruenza.cmp(&b.gravita_incongruenza)
+                        }
+                        ColonnaOrdinamento::Incongruenze => {
+                            a.incongruenze.len().cmp(&b.incongruenze.len())
+                        }
+                        ColonnaOrdinamento::DateTimeOriginal => {
+                            match (a.exif_datetime_original, b.exif_datetime_original) {
+                                (Some(dt_a), Some(dt_b)) => dt_a.cmp(&dt_b),
+                                (Some(_), None) => std::cmp::Ordering::Less,
+                                (None, Some(_)) => std::cmp::Ordering::Greater,
+                                (None, None) => std::cmp::Ordering::Equal,
+                            }
+                        }
+                        ColonnaOrdinamento::CreateDate => {
+                            match (a.exif_create_date, b.exif_create_date) {
+                                (Some(dt_a), Some(dt_b)) => dt_a.cmp(&dt_b),
+                                (Some(_), None) => std::cmp::Ordering::Less,
+                                (None, Some(_)) => std::cmp::Ordering::Greater,
+                                (None, None) => std::cmp::Ordering::Equal,
+                            }
+                        }
+                        ColonnaOrdinamento::ModifyDate => {
+                            match (a.exif_modify_date, b.exif_modify_date) {
+                                (Some(dt_a), Some(dt_b)) => dt_a.cmp(&dt_b),
+                                (Some(_), None) => std::cmp::Ordering::Less,
+                                (None, Some(_)) => std::cmp::Ordering::Greater,
+                                (None, None) => std::cmp::Ordering::Equal,
+                            }
+                        }
+                    };
+                    
+                    if self.ordine_crescente {
+                        cmp
+                    } else {
+                        cmp.reverse()
+                    }
+                });
+            }
             
             // Mostra la soglia nell'unità selezionata
             let soglia_display = match self.unita_gravita {
