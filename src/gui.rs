@@ -165,6 +165,10 @@ impl CorrectorApp {
         if let Some(ref dir) = self.directory {
             // Carica le foto (veloce con Rust!)
             self.foto_list = leggi_foto_da_directory(dir);
+            // Ricalcola le proposte con le strategie corrette della GUI
+            // (le foto vengono caricate con strategia di default "nome_file_preferito",
+            // ma la GUI usa "JsonPhotoTaken" di default)
+            self.calcola_proposte();
             self.aggiorna_statistiche();
         }
     }
@@ -573,14 +577,91 @@ impl eframe::App for CorrectorApp {
                                 }
                             }
                         }
-                        ui.label("Nome File");
-                        ui.label("Gravità");
-                        ui.label("Incongruenze");
-                        ui.label("DateTimeOriginal ⭐");
+                        // Header cliccabili per ordinamento
+                        let nome_response = ui.selectable_label(
+                            self.colonna_ordinamento == Some(ColonnaOrdinamento::NomeFile),
+                            "Nome File"
+                        );
+                        if nome_response.clicked() {
+                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::NomeFile) {
+                                self.ordine_crescente = !self.ordine_crescente;
+                            } else {
+                                self.colonna_ordinamento = Some(ColonnaOrdinamento::NomeFile);
+                                self.ordine_crescente = true;
+                            }
+                        }
+                        
+                        let gravita_response = ui.selectable_label(
+                            self.colonna_ordinamento == Some(ColonnaOrdinamento::Gravita),
+                            "Gravità"
+                        );
+                        if gravita_response.clicked() {
+                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::Gravita) {
+                                self.ordine_crescente = !self.ordine_crescente;
+                            } else {
+                                self.colonna_ordinamento = Some(ColonnaOrdinamento::Gravita);
+                                self.ordine_crescente = true;
+                            }
+                        }
+                        
+                        let mut inc_label_text = "Incongruenze".to_string();
+                        if self.colonna_ordinamento == Some(ColonnaOrdinamento::Incongruenze) {
+                            let arrow = if self.ordine_crescente { " ↑" } else { " ↓" };
+                            inc_label_text.push_str(arrow);
+                        }
+                        let inc_header_response = ui.button(inc_label_text);
+                        if inc_header_response.clicked() {
+                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::Incongruenze) {
+                                self.ordine_crescente = !self.ordine_crescente;
+                            } else {
+                                self.colonna_ordinamento = Some(ColonnaOrdinamento::Incongruenze);
+                                self.ordine_crescente = true;
+                            }
+                        }
+                        
+                        let dt_response = ui.selectable_label(
+                            self.colonna_ordinamento == Some(ColonnaOrdinamento::DateTimeOriginal),
+                            "DateTimeOriginal ⭐"
+                        );
+                        if dt_response.clicked() {
+                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::DateTimeOriginal) {
+                                self.ordine_crescente = !self.ordine_crescente;
+                            } else {
+                                self.colonna_ordinamento = Some(ColonnaOrdinamento::DateTimeOriginal);
+                                self.ordine_crescente = true;
+                            }
+                        }
+                        
                         ui.label("→ Proposta");
-                        ui.label("CreateDate");
+                        
+                        let cd_response = ui.selectable_label(
+                            self.colonna_ordinamento == Some(ColonnaOrdinamento::CreateDate),
+                            "CreateDate"
+                        );
+                        if cd_response.clicked() {
+                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::CreateDate) {
+                                self.ordine_crescente = !self.ordine_crescente;
+                            } else {
+                                self.colonna_ordinamento = Some(ColonnaOrdinamento::CreateDate);
+                                self.ordine_crescente = true;
+                            }
+                        }
+                        
                         ui.label("→ Proposta");
-                        ui.label("ModifyDate");
+                        
+                        let md_response = ui.selectable_label(
+                            self.colonna_ordinamento == Some(ColonnaOrdinamento::ModifyDate),
+                            "ModifyDate"
+                        );
+                        if md_response.clicked() {
+                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::ModifyDate) {
+                                self.ordine_crescente = !self.ordine_crescente;
+                            } else {
+                                self.colonna_ordinamento = Some(ColonnaOrdinamento::ModifyDate);
+                                self.ordine_crescente = true;
+                            }
+                        }
+                        
                         ui.label("→ Proposta");
                         ui.end_row();
                         

@@ -1,4 +1,4 @@
-mod gui;
+pub mod gui;
 
 use exif::{In, Tag, Value};
 use regex::Regex;
@@ -210,6 +210,7 @@ pub fn calcola_proposta_con_strategia(foto: &FotoData, strategia: &str) -> Optio
             }
         }
         "json_photo_taken" => {
+            // Restituisce direttamente foto.data_json che contiene l'ora corretta dal JSON
             return foto.data_json;
         }
         "json_creation" => {
@@ -219,6 +220,8 @@ pub fn calcola_proposta_con_strategia(foto: &FotoData, strategia: &str) -> Optio
             return foto.exif_datetime_original;
         }
         "nome_file_preferito" => {
+            // Questa strategia preferisce il nome file (con ora 12:00:00) al JSON
+            // ATTENZIONE: quando c'è un nome file con data, usa sempre 12:00:00 invece dell'ora dal JSON
             if let Some((anno, mese, giorno)) = foto.data_nome {
                 if let Ok(dt) = NaiveDateTime::parse_from_str(
                     &format!("{:04}-{:02}-{:02} 12:00:00", anno, mese, giorno),
@@ -227,6 +230,7 @@ pub fn calcola_proposta_con_strategia(foto: &FotoData, strategia: &str) -> Optio
                     return Some(DateTime::from_naive_utc_and_offset(dt, Utc));
                 }
             }
+            // Se non c'è nome file, usa il JSON (che contiene l'ora corretta)
             return foto.data_json;
         }
         "json_preferito" => {
@@ -273,6 +277,7 @@ pub fn rileva_incongruenze(foto: &FotoData) -> Vec<String> {
         }
         
         // Confronta con data nel JSON (photoTakenTime) - solo questo campo per il confronto
+        // Confronta solo la data (anno/mese/giorno), non l'ora, perché l'ora può differire
         if let Some(json_dt) = foto.data_json {
             let json_anno = json_dt.year();
             let json_mese = json_dt.month();
@@ -280,10 +285,17 @@ pub fn rileva_incongruenze(foto: &FotoData) -> Vec<String> {
             let exif_mese = exif_dt.month();
             let exif_giorno = exif_dt.day();
             
-            if exif_anno != json_anno || exif_mese != json_mese || exif_giorno != json_giorno {
-                incongruenze.push(format!("EXIF {} ≠ JSON photoTakenTime {}", 
+            // Considera un'incongruenza solo se la differenza è di almeno 1 giorno
+            // (non considerare differenze di ore/minuti come incongruenze)
+            let exif_date = exif_dt.date_naive();
+            let json_date = json_dt.date_naive();
+            let diff_giorni = (exif_date - json_date).num_days().abs();
+            
+            if diff_giorni >= 1 {
+                incongruenze.push(format!("EXIF {} ≠ JSON photoTakenTime {} (differenza: {} giorni)", 
                     format!("{:04}-{:02}-{:02}", exif_anno, exif_mese, exif_giorno),
-                    format!("{:04}-{:02}-{:02}", json_anno, json_mese, json_giorno)));
+                    format!("{:04}-{:02}-{:02}", json_anno, json_mese, json_giorno),
+                    diff_giorni));
             }
         }
     } else {
@@ -313,6 +325,7 @@ pub fn calcola_gravita_incongruenza(foto: &FotoData) -> i64 {
         }
         
         // Confronta EXIF con data nel JSON photoTakenTime (solo questo campo per il confronto)
+        // Usa solo la differenza in giorni (non considera differenze di ore/minuti)
         if let Some(json_dt) = foto.data_json {
             let exif_date = exif_dt.date_naive();
             let json_date = json_dt.date_naive();
@@ -519,14 +532,49 @@ fn main() -> eframe::Result<()> {
         if con_proposte > 0 {
             println!("\n📋 Prime 10 foto con proposte:");
             for foto in foto_list.iter().filter(|f| f.proposta_datetime_original.is_some()).take(10) {
-                println!("  {}", foto.nome_file);
+                println!("\n  {}", foto.nome_file);
+                println!("    Strategia default: {}", foto.strategia_datetime_original);
+                
+                if let Some(dt_json) = foto.data_json {
+                    println!("    data_json dal JSON: {} (ora={}:{}:{})", 
+                             dt_json.format("%Y-%m-%d %H:%M:%S"), 
+                             dt_json.hour(), dt_json.minute(), dt_json.second());
+                } else {
+                    println!("    data_json: None");
+                }
+                
                 if let Some(dt) = foto.exif_datetime_original {
-                    println!("    EXIF attuale: {}", dt.format("%Y-%m-%d %H:%M:%S"));
+                    println!("    EXIF attuale: {} (ora={}:{}:{})", 
+                             dt.format("%Y-%m-%d %H:%M:%S"),
+                             dt.hour(), dt.minute(), dt.second());
                 } else {
                     println!("    EXIF attuale: ❌");
                 }
+                
                 if let Some(dt) = foto.proposta_datetime_original {
-                    println!("    Proposta: {}", dt.format("%Y-%m-%d %H:%M:%S"));
+                    println!("    Proposta (default): {} (ora={}:{}:{})", 
+                             dt.format("%Y-%m-%d %H:%M:%S"),
+                             dt.hour(), dt.minute(), dt.second());
+                }
+                
+                // Test con strategia json_photo_taken
+                let proposta_json = calcola_proposta_con_strategia(&foto, "json_photo_taken");
+                if let Some(dt) = proposta_json {
+                    println!("    Test json_photo_taken: {} (ora={}:{}:{})", 
+                             dt.format("%Y-%m-%d %H:%M:%S"),
+                             dt.hour(), dt.minute(), dt.second());
+                } else {
+                    println!("    Test json_photo_taken: None");
+                }
+                
+                // Test con strategia nome_file_preferito
+                let proposta_nome = calcola_proposta_con_strategia(&foto, "nome_file_preferito");
+                if let Some(dt) = proposta_nome {
+                    println!("    Test nome_file_preferito: {} (ora={}:{}:{})", 
+                             dt.format("%Y-%m-%d %H:%M:%S"),
+                             dt.hour(), dt.minute(), dt.second());
+                } else {
+                    println!("    Test nome_file_preferito: None");
                 }
             }
         }
