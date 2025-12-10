@@ -1,5 +1,6 @@
 use eframe::egui;
 use std::path::PathBuf;
+use std::fs;
 use crate::{FotoData, leggi_foto_da_directory};
 
 #[derive(Clone, PartialEq)]
@@ -51,6 +52,7 @@ impl Strategia {
 
 pub struct CorrectorApp {
     directory: Option<PathBuf>,
+    ultima_cartella: Option<PathBuf>, // Ultima cartella aperta per riaprirla nel dialog
     foto_list: Vec<FotoData>,
     foto_selezionate: std::collections::HashSet<usize>, // Indici delle foto selezionate
     ultimo_indice_selezionato: Option<usize>, // Per gestire Shift+click
@@ -61,9 +63,7 @@ pub struct CorrectorApp {
     #[allow(dead_code)]
     loading_message: String,
     stats: String,
-    // State for confirmation dialog
-    mostra_conferma: bool,
-    foto_da_modificare_count: usize, // Number of photos to modify for confirmation popup
+    foto_da_modificare_count: usize, // Number of photos to modify
     // State for progress bar
     applicando_modifiche: bool,
     foto_totali_da_modificare: usize,
@@ -75,6 +75,8 @@ pub struct CorrectorApp {
     soglia_gravita_giorni: f32,
     unita_gravita: UnitaGravita,
     mostra_tutte_foto: bool, // Flag to show all photos, including those without incongruities
+    solo_exif_mancante: bool, // Flag to show only photos with missing EXIF
+    filtro_incongruenza: FiltroIncongruenza, // Filter by type of incongruity
     // Sorting
     colonna_ordinamento: Option<ColonnaOrdinamento>,
     ordine_crescente: bool,
@@ -98,6 +100,40 @@ enum UnitaGravita {
     Giorni,
     Mesi,
     Anni,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FiltroIncongruenza {
+    Tutte,
+    SoloExifMancante,
+    ExifAnnoDiversoFilename,
+    ExifDiversoJson,
+}
+
+impl FiltroIncongruenza {
+    fn display_name(&self) -> &str {
+        match self {
+            FiltroIncongruenza::Tutte => "Tutte le incongruenze",
+            FiltroIncongruenza::SoloExifMancante => "Solo EXIF mancante",
+            FiltroIncongruenza::ExifAnnoDiversoFilename => "EXIF anno ≠ filename",
+            FiltroIncongruenza::ExifDiversoJson => "EXIF ≠ JSON photoTakenTime",
+        }
+    }
+    
+    fn matches(&self, foto: &crate::FotoData) -> bool {
+        match self {
+            FiltroIncongruenza::Tutte => !foto.incongruenze.is_empty(),
+            FiltroIncongruenza::SoloExifMancante => {
+                foto.incongruenze.iter().any(|inc| inc.contains("EXIF DateTimeOriginal mancante"))
+            }
+            FiltroIncongruenza::ExifAnnoDiversoFilename => {
+                foto.incongruenze.iter().any(|inc| inc.contains("EXIF anno") && inc.contains("filename anno"))
+            }
+            FiltroIncongruenza::ExifDiversoJson => {
+                foto.incongruenze.iter().any(|inc| inc.contains("EXIF") && inc.contains("JSON photoTakenTime"))
+            }
+        }
+    }
 }
 
 impl UnitaGravita {
@@ -126,8 +162,10 @@ impl UnitaGravita {
 
 impl CorrectorApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let ultima_cartella = Self::carica_ultima_cartella();
         Self {
             directory: None,
+            ultima_cartella,
             foto_list: Vec::new(),
             foto_selezionate: std::collections::HashSet::new(),
             ultimo_indice_selezionato: None,
@@ -136,7 +174,6 @@ impl CorrectorApp {
             loading: false,
             loading_message: String::new(),
             stats: String::new(),
-            mostra_conferma: false,
             foto_da_modificare_count: 0,
             applicando_modifiche: false,
             foto_totali_da_modificare: 0,
@@ -146,15 +183,105 @@ impl CorrectorApp {
             soglia_gravita_giorni: 0.0,
             unita_gravita: UnitaGravita::Giorni,
             mostra_tutte_foto: false,
+            solo_exif_mancante: true, // Default: mostra solo EXIF mancante
+            filtro_incongruenza: FiltroIncongruenza::Tutte,
             colonna_ordinamento: None,
             ordine_crescente: true,
         }
     }
     
+    fn percorso_config() -> Option<PathBuf> {
+        std::env::var("HOME")
+            .ok()
+            .map(|home| PathBuf::from(home).join(".corrigi-exif-config.json"))
+    }
+    
+    fn carica_ultima_cartella() -> Option<PathBuf> {
+        let config_path = Self::percorso_config()?;
+        let content = fs::read_to_string(&config_path).ok()?;
+        let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let path_str = config.get("ultima_cartella")?.as_str()?;
+        let path = PathBuf::from(path_str);
+        // Verifica che la cartella esista ancora e prova a renderla canonica
+        if path.exists() && path.is_dir() {
+            // Prova a rendere il percorso canonico (assoluto)
+            path.canonicalize().ok().or(Some(path))
+        } else {
+            None
+        }
+    }
+    
+    fn salva_ultima_cartella(path: &PathBuf) {
+        if let Some(config_path) = Self::percorso_config() {
+            // Assicurati che il percorso sia assoluto e canonico per il salvataggio
+            let path_to_save = if let Ok(canonical) = path.canonicalize() {
+                canonical
+            } else {
+                path.clone()
+            };
+            
+            let config = serde_json::json!({
+                "ultima_cartella": path_to_save.to_string_lossy().to_string()
+            });
+            if let Ok(json_str) = serde_json::to_string_pretty(&config) {
+                if let Err(e) = fs::write(&config_path, json_str) {
+                    eprintln!("Errore nel salvataggio della configurazione in {:?}: {}", config_path, e);
+                } else {
+                    eprintln!("Configurazione salvata in: {:?}", config_path);
+                }
+            }
+        } else {
+            eprintln!("Impossibile determinare il percorso HOME per salvare la configurazione");
+        }
+    }
+    
     fn seleziona_cartella(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            self.directory = Some(path);
+        // Su Linux, rfd potrebbe non supportare set_directory() correttamente con XDG Portal
+        // Quindi cambiamo temporaneamente la directory di lavoro corrente
+        let vecchia_dir = std::env::current_dir().ok();
+        
+        // Cambia alla directory dell'ultima cartella aperta, se disponibile
+        if let Some(ref ultima_cartella) = self.ultima_cartella {
+            if ultima_cartella.exists() && ultima_cartella.is_dir() {
+                if let Ok(canonical_path) = ultima_cartella.canonicalize() {
+                    if std::env::set_current_dir(&canonical_path).is_ok() {
+                        eprintln!("Directory cambiata a: {:?}", canonical_path);
+                    }
+                } else if std::env::set_current_dir(ultima_cartella).is_ok() {
+                    eprintln!("Directory cambiata a: {:?}", ultima_cartella);
+                }
+            }
+        }
+        
+        // Apri il dialog (su Linux, molti dialog si aprono nella directory corrente)
+        let mut dialog = rfd::FileDialog::new();
+        
+        // Prova anche con set_directory come fallback (potrebbe funzionare con GTK3 backend)
+        if let Some(ref ultima_cartella) = self.ultima_cartella {
+            if ultima_cartella.exists() && ultima_cartella.is_dir() {
+                if let Ok(canonical_path) = ultima_cartella.canonicalize() {
+                    if let Some(path_str) = canonical_path.to_str() {
+                        dialog = dialog.set_directory(path_str);
+                        eprintln!("Tentativo di impostare directory con set_directory: {}", path_str);
+                    }
+                } else if let Some(path_str) = ultima_cartella.to_str() {
+                    dialog = dialog.set_directory(path_str);
+                    eprintln!("Tentativo di impostare directory con set_directory: {}", path_str);
+                }
+            }
+        }
+        
+        if let Some(path) = dialog.pick_folder() {
+            eprintln!("Cartella selezionata: {:?}", path);
+            self.directory = Some(path.clone());
+            self.ultima_cartella = Some(path.clone());
+            Self::salva_ultima_cartella(&path);
             self.carica_foto();
+        }
+        
+        // Ripristina la directory di lavoro originale
+        if let Some(ref vecchia) = vecchia_dir {
+            let _ = std::env::set_current_dir(vecchia);
         }
     }
     
@@ -327,34 +454,7 @@ impl CorrectorApp {
 
 impl eframe::App for CorrectorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Confirmation dialog
-        if self.mostra_conferma {
-            egui::Window::new("⚠️ Confirm EXIF Changes")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.heading("Warning!");
-                    ui.separator();
-                    ui.label("You are about to modify the EXIF metadata of your photos.");
-                    ui.label("This operation permanently modifies the files.");
-                    ui.label("");
-                    
-                    ui.label(format!("Photos to modify: {}", self.foto_da_modificare_count));
-                    ui.label("");
-                    ui.label("⚠️ Make sure you have a backup of your photos!");
-                    ui.separator();
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("✅ Confirm and Apply").clicked() {
-                            self.mostra_conferma = false;
-                            self.avvia_applicazione_modifiche(ctx);
-                        }
-                        if ui.button("❌ Cancel").clicked() {
-                            self.mostra_conferma = false;
-                        }
-                    });
-                });
-        }
+        // Confirmation dialog rimosso - applica direttamente le modifiche
         
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("EXIF Date Corrector - Rust Version");
@@ -438,42 +538,89 @@ impl eframe::App for CorrectorApp {
             
             ui.separator();
             
-            // Checkbox to show all photos
+            // Checkbox to show only photos with missing EXIF (checked by default)
+            ui.checkbox(&mut self.solo_exif_mancante, "Mostra solo foto con EXIF mancante");
+            
+            // Menu a tendina per filtrare per tipo di incongruenza
+            ui.horizontal(|ui| {
+                ui.label("Filtra per tipo di incongruenza:");
+                egui::ComboBox::from_id_source("filtro_incongruenza")
+                    .selected_text(self.filtro_incongruenza.display_name())
+                    .show_ui(ui, |ui| {
+                        for filtro in [
+                            FiltroIncongruenza::Tutte,
+                            FiltroIncongruenza::SoloExifMancante,
+                            FiltroIncongruenza::ExifAnnoDiversoFilename,
+                            FiltroIncongruenza::ExifDiversoJson,
+                        ] {
+                            ui.selectable_value(&mut self.filtro_incongruenza, filtro, filtro.display_name());
+                        }
+                    });
+            });
+            
+            ui.separator();
+            
+            // Checkbox to show all photos (deprecated, mantenuto per compatibilità)
             ui.checkbox(&mut self.mostra_tutte_foto, "Show all photos (including those without incongruities)");
             
             ui.separator();
             
-            // Photo table - filter based on flag and threshold
+            // Photo table - filter based on flags and threshold
             let soglia_secondi = (self.soglia_gravita_giorni * 86400.0) as i64;
-            let mut foto_da_mostrare: Vec<_> = if self.mostra_tutte_foto {
-                // Mostra tutte le foto, ma filtra per soglia se ci sono incongruenze
-                self.foto_list
-                    .iter()
-                    .filter(|f| {
+            let mut foto_da_mostrare: Vec<_> = self.foto_list
+                .iter()
+                .filter(|f| {
+                    // Filtro principale: solo EXIF mancante se abilitato
+                    if self.solo_exif_mancante {
+                        // Mostra solo foto con DateTimeOriginal O CreateDate mancanti
+                        if f.exif_datetime_original.is_some() && f.exif_create_date.is_some() {
+                            return false; // Ha entrambi i campi EXIF, quindi escludi
+                        }
+                    }
+                    
+                    // Filtro per tipo di incongruenza (solo se ci sono incongruenze)
+                    if !f.incongruenze.is_empty() {
+                        if !self.filtro_incongruenza.matches(f) {
+                            return false;
+                        }
+                    } else {
+                        // Se non ci sono incongruenze, mostra solo se:
+                        // - mostra_tutte_foto è true, OPPURE
+                        // - solo_exif_mancante è true (per mostrare quelle con EXIF mancante anche senza incongruenze)
+                        if !self.mostra_tutte_foto && !self.solo_exif_mancante {
+                            return false;
+                        }
+                        // Se solo_exif_mancante è true ma non ci sono incongruenze,
+                        // mostra solo se ha EXIF mancante (già controllato sopra)
+                        if self.solo_exif_mancante {
+                            return true; // Ha EXIF mancante (già verificato sopra)
+                        }
+                    }
+                    
+                    // Se mostra_tutte_foto è true, mostra anche quelle senza incongruenze
+                    if self.mostra_tutte_foto {
                         if f.incongruenze.is_empty() {
                             return true; // Mostra anche quelle senza incongruenze
                         }
                         // Per quelle con incongruenze, applica il filtro sulla soglia
                         let gravita_secondi = (f.gravita_incongruenza as f64 * 86400.0) as i64;
                         gravita_secondi >= soglia_secondi
-                    })
-                    .cloned()
-                    .collect()
-            } else {
-                // Mostra solo quelle con incongruenze che superano la soglia
-                self.foto_list
-                    .iter()
-                    .filter(|f| {
+                    } else {
+                        // Mostra solo quelle con incongruenze che superano la soglia
                         if f.incongruenze.is_empty() {
+                            // Se solo_exif_mancante è true, mostra anche quelle con EXIF mancante senza incongruenze
+                            if self.solo_exif_mancante {
+                                return true;
+                            }
                             return false;
                         }
                         // Converti la gravità della foto in secondi per il confronto
                         let gravita_secondi = (f.gravita_incongruenza as f64 * 86400.0) as i64;
                         gravita_secondi >= soglia_secondi
-                    })
-                    .cloned()
-                    .collect()
-            };
+                    }
+                })
+                .cloned()
+                .collect();
             
             // Applica ordinamento se selezionato
             if let Some(colonna) = self.colonna_ordinamento {
@@ -932,7 +1079,8 @@ impl eframe::App for CorrectorApp {
                         
                         if foto_con_proposte > 0 {
                             self.foto_da_modificare_count = foto_con_proposte;
-                            self.mostra_conferma = true;
+                            // Applica direttamente le modifiche senza dialog di conferma
+                            self.avvia_applicazione_modifiche(ctx);
                         }
                     }
                 }
