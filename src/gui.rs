@@ -1,6 +1,7 @@
 use eframe::egui;
 use std::path::PathBuf;
 use std::fs;
+use chrono::Datelike;
 use crate::{FotoData, leggi_foto_da_directory};
 
 #[derive(Clone, PartialEq)]
@@ -58,10 +59,11 @@ pub struct CorrectorApp {
     ultimo_indice_selezionato: Option<usize>, // Per gestire Shift+click
     strategia_datetime_original: Strategia,
     strategia_create_date: Strategia,
-    #[allow(dead_code)]
     loading: bool,
-    #[allow(dead_code)]
     loading_message: String,
+    loading_progress: Option<(usize, usize)>, // (foto_trovate, foto_elaborate) per progresso
+    loading_thread: Option<std::thread::JoinHandle<Vec<FotoData>>>, // Thread per caricamento asincrono
+    loading_progress_receiver: Option<std::sync::mpsc::Receiver<usize>>, // Canale per ricevere progresso
     stats: String,
     foto_da_modificare_count: usize, // Number of photos to modify
     // State for progress bar
@@ -177,6 +179,9 @@ impl CorrectorApp {
             strategia_create_date: Strategia::JsonPreferito, // JSON se disponibile, altrimenti filename
             loading: false,
             loading_message: String::new(),
+            loading_progress: None,
+            loading_thread: None,
+            loading_progress_receiver: None,
             stats: String::new(),
             foto_da_modificare_count: 0,
             applicando_modifiche: false,
@@ -283,7 +288,7 @@ impl CorrectorApp {
             self.directory = Some(path.clone());
             self.ultima_cartella = Some(path.clone());
             Self::salva_ultima_cartella(&path);
-            self.carica_foto();
+            self.avvia_caricamento_foto();
         }
         
         // Ripristina la directory di lavoro originale
@@ -292,23 +297,95 @@ impl CorrectorApp {
         }
     }
     
-    fn carica_foto(&mut self) {
+    fn avvia_caricamento_foto(&mut self) {
         if let Some(ref dir) = self.directory {
-            // Carica le foto (veloce con Rust!)
-            self.foto_list = leggi_foto_da_directory(dir);
-            // Ricostruisci la mappa path->indice per lookup veloce
-            self.path_to_index.clear();
-            for (idx, foto) in self.foto_list.iter().enumerate() {
-                self.path_to_index.insert(foto.path.clone(), idx);
+            self.loading = true;
+            self.loading_message = format!("Scanning directory: {:?}...", dir);
+            self.loading_progress = None;
+            
+            // Crea canale per comunicare progresso
+            let (sender, receiver) = std::sync::mpsc::channel();
+            self.loading_progress_receiver = Some(receiver);
+            
+            // Avvia il caricamento in un thread separato
+            let dir_clone = dir.clone();
+            let handle = std::thread::spawn(move || {
+                eprintln!("[DEBUG] Inizio caricamento foto da: {:?}", dir_clone);
+                crate::leggi_foto_da_directory_con_progresso(&dir_clone, Some(sender))
+            });
+            
+            self.loading_thread = Some(handle);
+        }
+    }
+    
+    fn verifica_caricamento_completato(&mut self, ctx: &egui::Context) {
+        if let Some(handle) = &self.loading_thread {
+            if handle.is_finished() {
+                // Prendi ownership del thread handle
+                if let Some(handle) = self.loading_thread.take() {
+                    match handle.join() {
+                    Ok(foto_list) => {
+                        eprintln!("[DEBUG] Caricamento completato: {} foto", foto_list.len());
+                        self.foto_list = foto_list;
+                        
+                        // Ricostruisci la mappa path->indice per lookup veloce
+                        eprintln!("[DEBUG] Costruzione mappa path->indice...");
+                        self.path_to_index.clear();
+                        for (idx, foto) in self.foto_list.iter().enumerate() {
+                            self.path_to_index.insert(foto.path.clone(), idx);
+                        }
+                        eprintln!("[DEBUG] Mappa costruita con {} elementi", self.path_to_index.len());
+                        
+                        // Ricalcola le proposte con le strategie corrette della GUI
+                        eprintln!("[DEBUG] Calcolo proposte...");
+                        self.calcola_proposte();
+                        eprintln!("[DEBUG] Proposte calcolate");
+                        
+                        eprintln!("[DEBUG] Aggiornamento statistiche...");
+                        self.aggiorna_statistiche();
+                        self.filtro_dirty = true; // Segna che il filtro deve essere ricalcolato
+                        
+                        self.loading = false;
+                        self.loading_message.clear();
+                        self.loading_progress = None;
+                        
+                        // Richiedi repaint per aggiornare la UI
+                        ctx.request_repaint();
+                    }
+                    Err(e) => {
+                        eprintln!("[ERROR] Errore nel caricamento: {:?}", e);
+                        self.loading = false;
+                        self.loading_message = format!("Error loading photos: {:?}", e);
+                    }
+                }
+                }
+            } else {
+                // Thread ancora in esecuzione - aggiorna il progresso
+                if let Some(ref receiver) = self.loading_progress_receiver {
+                    // Prova a ricevere aggiornamenti di progresso (non bloccante)
+                    while let Ok(count) = receiver.try_recv() {
+                        // Stima totale basata sul fatto che abbiamo già trovato le foto
+                        // Per ora usiamo un placeholder, ma potremmo migliorare
+                        if self.loading_progress.is_none() {
+                            // Prima volta: stima che ci siano almeno count foto
+                            self.loading_progress = Some((count, count));
+                        } else {
+                            // Aggiorna il conteggio elaborato
+                            if let Some((trovate, _)) = self.loading_progress {
+                                self.loading_progress = Some((trovate.max(count), count));
+                            }
+                        }
+                    }
+                }
+                
+                if let Some((trovate, elaborate)) = self.loading_progress {
+                    self.loading_message = format!("Loading photos... Processing {}/{} files...", elaborate, trovate);
+                } else {
+                    self.loading_message = "Scanning directory and loading photos...".to_string();
+                }
+                // Richiedi repaint per aggiornare il messaggio
+                ctx.request_repaint();
             }
-            // Ricalcola le proposte con le strategie corrette della GUI
-            // (le foto vengono caricate con strategia di default "nome_file_preferito",
-            // ma la GUI usa "JsonPhotoTaken" di default)
-            // IMPORTANTE: ricalcola sempre le proposte quando si caricano le foto
-            // per assicurarsi che usino le strategie corrette della GUI
-            self.calcola_proposte();
-            self.aggiorna_statistiche();
-            self.filtro_dirty = true; // Segna che il filtro deve essere ricalcolato
         }
     }
     
@@ -590,6 +667,9 @@ impl CorrectorApp {
 
 impl eframe::App for CorrectorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Verifica se il caricamento è completato
+        self.verifica_caricamento_completato(ctx);
+        
         // Confirmation dialog rimosso - applica direttamente le modifiche
         
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -609,6 +689,42 @@ impl eframe::App for CorrectorApp {
                     ui.label("No folder selected");
                 }
             });
+            
+            // Mostra indicatore di caricamento se sta caricando - MOLTO VISIBILE
+            if self.loading {
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    egui::Vec2::new(ui.available_width(), 100.0),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(10.0);
+                            ui.spinner();
+                            ui.add_space(10.0);
+                            ui.heading(&self.loading_message);
+                            ui.add_space(10.0);
+                            
+                            if let Some((trovate, elaborate)) = self.loading_progress {
+                                if elaborate <= trovate && trovate > 0 {
+                                    let progresso = elaborate as f32 / trovate as f32;
+                                    ui.add(egui::ProgressBar::new(progresso)
+                                        .show_percentage()
+                                        .desired_width(ui.available_width() - 40.0));
+                                    ui.label(format!("Processing: {}/{} photos ({:.1}%)", 
+                                                   elaborate, trovate, progresso * 100.0));
+                                }
+                            } else {
+                                // Progress bar indeterminata durante lo scan
+                                ui.add(egui::ProgressBar::new(0.0)
+                                    .show_percentage()
+                                    .desired_width(ui.available_width() - 40.0));
+                                ui.label("Scanning directory...");
+                            }
+                        });
+                    }
+                );
+                ui.separator();
+            }
             
             ui.separator();
             
@@ -988,17 +1104,25 @@ impl eframe::App for CorrectorApp {
                             // DateTimeOriginal proposal
                             if let Some(dt_proposta) = foto.proposta_datetime_original {
                                 let testo_proposta = format!("→ {}", dt_proposta.format("%Y-%m-%d %H:%M:%S"));
-                                // Compare with current EXIF to decide color
-                                let cambia = match foto.exif_datetime_original {
-                                    Some(dt_exif) => dt_exif != dt_proposta,
-                                    None => true, // If EXIF missing, consider it as a change
-                                };
-                                if cambia {
-                                    // Orange color to indicate modification
-                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Orange
+                                // Check if this is the "flag" date 1900-01-01 for photos without metadata
+                                let is_flag_date = dt_proposta.year() == 1900 && dt_proposta.month() == 1 && dt_proposta.day() == 1;
+                                
+                                if is_flag_date {
+                                    // Red/purple color to indicate this is a flag date for manual classification
+                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 0, 255)); // Magenta
                                 } else {
-                                    // Gray if no change
-                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Gray
+                                    // Compare with current EXIF to decide color
+                                    let cambia = match foto.exif_datetime_original {
+                                        Some(dt_exif) => dt_exif != dt_proposta,
+                                        None => true, // If EXIF missing, consider it as a change
+                                    };
+                                    if cambia {
+                                        // Orange color to indicate modification
+                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Orange
+                                    } else {
+                                        // Gray if no change
+                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Gray
+                                    }
                                 }
                                 ui.label(testo_proposta);
                                 ui.visuals_mut().override_text_color = None; // Reset
@@ -1016,17 +1140,25 @@ impl eframe::App for CorrectorApp {
                             // CreateDate proposal
                             if let Some(dt_proposta) = foto.proposta_create_date {
                                 let testo_proposta = format!("→ {}", dt_proposta.format("%Y-%m-%d %H:%M:%S"));
-                                // Compare with current EXIF to decide color
-                                let cambia = match foto.exif_create_date {
-                                    Some(dt_exif) => dt_exif != dt_proposta,
-                                    None => true, // If EXIF missing, consider it as a change
-                                };
-                                if cambia {
-                                    // Orange color to indicate modification
-                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Orange
+                                // Check if this is the "flag" date 1900-01-01 for photos without metadata
+                                let is_flag_date = dt_proposta.year() == 1900 && dt_proposta.month() == 1 && dt_proposta.day() == 1;
+                                
+                                if is_flag_date {
+                                    // Red/purple color to indicate this is a flag date for manual classification
+                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 0, 255)); // Magenta
                                 } else {
-                                    // Gray if no change
-                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Gray
+                                    // Compare with current EXIF to decide color
+                                    let cambia = match foto.exif_create_date {
+                                        Some(dt_exif) => dt_exif != dt_proposta,
+                                        None => true, // If EXIF missing, consider it as a change
+                                    };
+                                    if cambia {
+                                        // Orange color to indicate modification
+                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Orange
+                                    } else {
+                                        // Gray if no change
+                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Gray
+                                    }
                                 }
                                 ui.label(testo_proposta);
                                 ui.visuals_mut().override_text_color = None; // Reset

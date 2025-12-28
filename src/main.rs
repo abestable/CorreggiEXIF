@@ -18,7 +18,6 @@ pub struct FotoData {
     data_nome: Option<(i32, u32, u32)>, // (anno, mese, giorno)
     data_json: Option<DateTime<Utc>>, // photoTakenTime dal JSON
     data_json_creation: Option<DateTime<Utc>>, // creationTime dal JSON
-    data_filesystem: Option<DateTime<Utc>>, // Data di modifica o creazione del file (fallback)
     exif_datetime_original: Option<DateTime<Utc>>,
     exif_create_date: Option<DateTime<Utc>>,
     #[allow(dead_code)]
@@ -237,6 +236,7 @@ pub fn calcola_proposta_con_strategia(foto: &FotoData, strategia: &str) -> Optio
         }
         "json_preferito" => {
             // Preferisci photoTakenTime, altrimenti creationTime, altrimenti nome file
+            // Se non c'è nulla, usa 1900-01-01 come flag per foto da riclassificare
             if let Some(dt) = foto.data_json {
                 return Some(dt);
             }
@@ -250,6 +250,10 @@ pub fn calcola_proposta_con_strategia(foto: &FotoData, strategia: &str) -> Optio
                 ) {
                     return Some(DateTime::from_naive_utc_and_offset(dt, Utc));
                 }
+            }
+            // Nessuna fonte disponibile: usa 1900-01-01 come flag per foto da riclassificare manualmente
+            if let Ok(dt) = NaiveDateTime::parse_from_str("1900-01-01 00:00:00", "%Y-%m-%d %H:%M:%S") {
+                return Some(DateTime::from_naive_utc_and_offset(dt, Utc));
             }
         }
         _ => {}
@@ -391,10 +395,17 @@ pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
 }
 
 pub fn leggi_foto_da_directory(directory: &Path) -> Vec<FotoData> {
+    leggi_foto_da_directory_con_progresso(directory, None)
+}
+
+pub fn leggi_foto_da_directory_con_progresso(directory: &Path, progress_sender: Option<std::sync::mpsc::Sender<usize>>) -> Vec<FotoData> {
+    eprintln!("[DEBUG] leggi_foto_da_directory: inizio scan directory {:?}", directory);
     let estensioni = vec!["jpg", "JPG", "jpeg", "JPEG", "orf", "ORF", "nef", "NEF"];
     let mut foto_files = Vec::new();
     
     // Cerca ricorsivamente in tutte le sottocartelle
+    eprintln!("[DEBUG] Scan ricorsivo directory...");
+    let mut count = 0;
     for entry in walkdir::WalkDir::new(directory) {
         if let Ok(entry) = entry {
             if entry.file_type().is_file() {
@@ -403,21 +414,52 @@ pub fn leggi_foto_da_directory(directory: &Path) -> Vec<FotoData> {
                     if let Some(ext_str) = ext.to_str() {
                         if estensioni.contains(&ext_str) {
                             foto_files.push(path.to_path_buf());
+                            count += 1;
+                            if count % 1000 == 0 {
+                                eprintln!("[DEBUG] Trovate {} foto finora...", count);
+                            }
                         }
                     }
                 }
             }
         }
     }
+    // Comunica il totale trovato PRIMA di iniziare la lettura
+    let total_files = foto_files.len();
+    if let Some(ref sender) = progress_sender {
+        let _ = sender.send(total_files); // Invia il totale trovato
+    }
     
-    // Usa rayon per parallelizzare la lettura
+    // Usa rayon per parallelizzare la lettura con progresso
+    let start = std::time::Instant::now();
+    let progress_mutex = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    
     let foto_list: Vec<FotoData> = foto_files
         .into_par_iter()
-        .map(leggi_foto_singola)
+        .map(|foto_path| {
+            let result = leggi_foto_singola(foto_path);
+            
+            // Aggiorna progresso ogni 100 foto
+            let mut count = progress_mutex.lock().unwrap();
+            *count += 1;
+            if *count % 100 == 0 || *count == total_files {
+                if let Some(ref sender) = progress_sender {
+                    let _ = sender.send(*count);
+                }
+            }
+            
+            result
+        })
         .collect();
+    let elapsed = start.elapsed();
+    eprintln!("[DEBUG] Lettura completata: {} foto elaborate in {:?} ({:.2} foto/sec)", 
+              foto_list.len(), elapsed, 
+              foto_list.len() as f64 / elapsed.as_secs_f64());
     
+    eprintln!("[DEBUG] Ordinamento foto...");
     let mut foto_list_sorted = foto_list;
     foto_list_sorted.sort_by(|a, b| a.nome_file.cmp(&b.nome_file));
+    eprintln!("[DEBUG] Ordinamento completato");
     foto_list_sorted
 }
 
