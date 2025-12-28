@@ -18,6 +18,7 @@ pub struct FotoData {
     data_nome: Option<(i32, u32, u32)>, // (anno, mese, giorno)
     data_json: Option<DateTime<Utc>>, // photoTakenTime dal JSON
     data_json_creation: Option<DateTime<Utc>>, // creationTime dal JSON
+    data_filesystem: Option<DateTime<Utc>>, // Data di modifica o creazione del file (fallback)
     exif_datetime_original: Option<DateTime<Utc>>,
     exif_create_date: Option<DateTime<Utc>>,
     #[allow(dead_code)]

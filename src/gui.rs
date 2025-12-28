@@ -173,8 +173,8 @@ impl CorrectorApp {
             foto_list: Vec::new(),
             foto_selezionate: std::collections::HashSet::new(),
             ultimo_indice_selezionato: None,
-            strategia_datetime_original: Strategia::JsonPhotoTaken,
-            strategia_create_date: Strategia::JsonPhotoTaken,
+            strategia_datetime_original: Strategia::JsonPreferito, // JSON se disponibile, altrimenti filename
+            strategia_create_date: Strategia::JsonPreferito, // JSON se disponibile, altrimenti filename
             loading: false,
             loading_message: String::new(),
             stats: String::new(),
@@ -563,6 +563,9 @@ impl CorrectorApp {
                     }
                 }
                 
+                // IMPORTANTE: Ricalcola le proposte con le strategie corrette della GUI
+                // dopo il reload, altrimenti rimangono quelle di default
+                self.calcola_proposte();
                 self.aggiorna_statistiche();
                 self.filtro_dirty = true; // Ricalcola il filtro dopo il reload
             }
