@@ -30,6 +30,37 @@ pub struct FotoData {
     strategia_modify_date: String,
     incongruenze: Vec<String>, // Lista di incongruenze rilevate
     gravita_incongruenza: i64, // Differenza in giorni (0 = nessuna incongruenza)
+    #[allow(dead_code)]
+    jpg_associato_usato: bool, // True se l'EXIF è stato letto da un JPG associato (per RAW)
+}
+
+impl FotoData {
+    pub fn is_foto_1900(&self) -> bool {
+        // Foto senza metadati: proposta è 1900-01-01
+        if let Some(dt) = self.proposta_datetime_original {
+            dt.year() == 1900 && dt.month() == 1 && dt.day() == 1
+        } else {
+            false
+        }
+    }
+    
+    pub fn is_foto_whatsapp(&self) -> bool {
+        // Foto IMG_* da WhatsApp
+        self.nome_file.starts_with("IMG_") || self.nome_file.starts_with("IMG-")
+    }
+    
+    pub fn is_foto_raw(&self) -> bool {
+        // Foto RAW (ORF/NEF) - controlla l'estensione
+        if let Some(ext) = self.path.extension() {
+            if let Some(ext_str) = ext.to_str() {
+                matches!(ext_str.to_lowercase().as_str(), "orf" | "nef")
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +83,20 @@ pub fn estrai_anno_da_nome(nome_file: &str) -> Option<(i32, u32, u32)> {
         if let Ok(anno) = caps[1].parse::<i32>() {
             if (1900..=2100).contains(&anno) {
                 return Some((anno, 1, 1));
+            }
+        }
+    }
+    
+    // Pattern: "IMG_YYYYMMDD" o "IMG-YYYYMMDD" (WhatsApp e altre app)
+    let re = Regex::new(r"IMG[_-](\d{4})(\d{2})(\d{2})").ok()?;
+    if let Some(caps) = re.captures(nome_file) {
+        if let Ok(anno) = caps[1].parse::<i32>() {
+            if let Ok(mese) = caps[2].parse::<u32>() {
+                if let Ok(giorno) = caps[3].parse::<u32>() {
+                    if (1900..=2100).contains(&anno) && (1..=12).contains(&mese) && (1..=31).contains(&giorno) {
+                        return Some((anno, mese, giorno));
+                    }
+                }
             }
         }
     }
@@ -81,6 +126,34 @@ pub fn estrai_anno_da_nome(nome_file: &str) -> Option<(i32, u32, u32)> {
                     }
                 }
             }
+        }
+    }
+    
+    None
+}
+
+pub fn trova_file_jpg_associato(foto_path: &Path) -> Option<PathBuf> {
+    // Per file RAW (ORF, NEF), cerca un JPG associato con lo stesso nome base
+    let ext = foto_path.extension()?.to_str()?.to_lowercase();
+    if !matches!(ext.as_str(), "orf" | "nef") {
+        return None; // Non è un file RAW
+    }
+    
+    let directory = foto_path.parent()?;
+    let base_name = foto_path.file_stem()?.to_str()?;
+    
+    // Cerca JPG con lo stesso nome base
+    let possibili_jpg = vec![
+        format!("{}.jpg", base_name),
+        format!("{}.JPG", base_name),
+        format!("{}.jpeg", base_name),
+        format!("{}.JPEG", base_name),
+    ];
+    
+    for nome_jpg in possibili_jpg {
+        let jpg_path = directory.join(&nome_jpg);
+        if jpg_path.exists() {
+            return Some(jpg_path);
         }
     }
     
@@ -360,7 +433,10 @@ pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
         .map(|p| leggi_data_json_completo(p))
         .unwrap_or((None, None));
     
-    let (exif_dt, exif_cd, exif_md) = ottieni_tutti_campi_exif(&foto_path);
+    // Per file RAW (ORF, NEF), cerca un JPG associato e leggi EXIF da quello
+    // Spesso le fotocamere creano sia RAW che JPG, e l'EXIF è solo nel JPG
+    let file_per_exif = trova_file_jpg_associato(&foto_path).unwrap_or(foto_path.clone());
+    let (exif_dt, exif_cd, exif_md) = ottieni_tutti_campi_exif(&file_per_exif);
     
     let mut foto = FotoData {
         path: foto_path,
@@ -380,7 +456,13 @@ pub fn leggi_foto_singola(foto_path: PathBuf) -> FotoData {
         strategia_modify_date: "nome_file_preferito".to_string(),
         incongruenze: Vec::new(),
         gravita_incongruenza: 0,
+        jpg_associato_usato: false,
     };
+    
+    // Verifica se è stato usato un JPG associato
+    let jpg_associato_usato = trova_file_jpg_associato(&foto.path).is_some() && 
+                               exif_dt.is_some();
+    foto.jpg_associato_usato = jpg_associato_usato;
     
     // Calcola proposte iniziali usando le strategie di default
     foto.proposta_datetime_original = calcola_proposta_con_strategia(&foto, &foto.strategia_datetime_original);
@@ -659,7 +741,8 @@ fn main() -> eframe::Result<()> {
     // Altrimenti avvia la GUI
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1400.0, 800.0]),
+            .with_maximized(true) // Maximized invece di fullscreen per vedere i bordi
+            .with_inner_size([1400.0, 800.0]), // Dimensione di fallback
         ..Default::default()
     };
     

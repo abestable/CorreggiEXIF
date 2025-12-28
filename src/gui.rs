@@ -53,6 +53,7 @@ impl Strategia {
 
 pub struct CorrectorApp {
     directory: Option<PathBuf>,
+    directories: Vec<PathBuf>, // Cartelle selezionate (supporto multiplo)
     ultima_cartella: Option<PathBuf>, // Ultima cartella aperta per riaprirla nel dialog
     foto_list: Vec<FotoData>,
     foto_selezionate: std::collections::HashSet<usize>, // Indici delle foto selezionate
@@ -79,6 +80,10 @@ pub struct CorrectorApp {
     mostra_tutte_foto: bool, // Flag to show all photos, including those without incongruities
     solo_exif_mancante: bool, // Flag to show only photos with missing EXIF
     filtro_incongruenza: FiltroIncongruenza, // Filter by type of incongruity
+    // Filtri per categorie di foto
+    mostra_foto_1900: bool, // Foto senza metadati (1900-01-01)
+    mostra_foto_whatsapp: bool, // Foto IMG_* da WhatsApp
+    mostra_foto_raw: bool, // Foto RAW (ORF/NEF) con JPG associato
     // Sorting
     colonna_ordinamento: Option<ColonnaOrdinamento>,
     ordine_crescente: bool,
@@ -167,10 +172,37 @@ impl UnitaGravita {
 }
 
 impl CorrectorApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Applica tema scuro come prima
+        let mut style = (*cc.egui_ctx.style()).clone();
+        
+        // Tema scuro
+        style.visuals.dark_mode = true;
+        style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(30, 30, 30);
+        style.visuals.extreme_bg_color = egui::Color32::from_rgb(25, 25, 25);
+        style.visuals.panel_fill = egui::Color32::from_rgb(35, 35, 38);
+        style.visuals.window_fill = egui::Color32::from_rgb(30, 30, 30);
+        style.visuals.faint_bg_color = egui::Color32::from_rgb(40, 40, 40);
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::new(20.0, egui::FontFamily::Proportional)
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::new(14.0, egui::FontFamily::Proportional)
+        );
+        
+        // Padding e spazi ragionevoli
+        style.spacing.item_spacing = egui::Vec2::new(6.0, 6.0);
+        style.spacing.window_margin = egui::Margin::same(8.0);
+        style.spacing.button_padding = egui::Vec2::new(10.0, 5.0);
+        
+        cc.egui_ctx.set_style(style);
+        
         let ultima_cartella = Self::carica_ultima_cartella();
         Self {
             directory: None,
+            directories: Vec::new(),
             ultima_cartella,
             foto_list: Vec::new(),
             foto_selezionate: std::collections::HashSet::new(),
@@ -194,6 +226,9 @@ impl CorrectorApp {
             mostra_tutte_foto: false,
             solo_exif_mancante: true, // Default: mostra solo EXIF mancante
             filtro_incongruenza: FiltroIncongruenza::Tutte,
+            mostra_foto_1900: false, // Default: non filtrare per categoria
+            mostra_foto_whatsapp: false, // Default: non filtrare per categoria
+            mostra_foto_raw: false, // Default: non filtrare per categoria
             colonna_ordinamento: None,
             ordine_crescente: true,
             foto_da_mostrare_cached: Vec::new(),
@@ -283,12 +318,29 @@ impl CorrectorApp {
             }
         }
         
-        if let Some(path) = dialog.pick_folder() {
-            eprintln!("Cartella selezionata: {:?}", path);
-            self.directory = Some(path.clone());
-            self.ultima_cartella = Some(path.clone());
-            Self::salva_ultima_cartella(&path);
-            self.avvia_caricamento_foto();
+        // Permetti selezione multipla di cartelle (Shift+click nel dialog)
+        // Prova prima pick_folders (selezione multipla)
+        if let Some(paths) = dialog.clone().pick_folders() {
+            if !paths.is_empty() {
+                eprintln!("Cartelle selezionate: {:?}", paths);
+                self.directories = paths.clone();
+                // Usa la prima cartella come principale per compatibilità
+                self.directory = Some(paths[0].clone());
+                self.ultima_cartella = Some(paths[0].clone());
+                Self::salva_ultima_cartella(&paths[0]);
+                // Carica foto da tutte le cartelle selezionate
+                self.avvia_caricamento_foto_multiplo();
+            }
+        } else {
+            // Fallback: se pick_folders non è supportato, usa pick_folder
+            if let Some(path) = dialog.pick_folder() {
+                eprintln!("Cartella selezionata: {:?}", path);
+                self.directory = Some(path.clone());
+                self.directories = vec![path.clone()];
+                self.ultima_cartella = Some(path.clone());
+                Self::salva_ultima_cartella(&path);
+                self.avvia_caricamento_foto();
+            }
         }
         
         // Ripristina la directory di lavoro originale
@@ -312,6 +364,36 @@ impl CorrectorApp {
             let handle = std::thread::spawn(move || {
                 eprintln!("[DEBUG] Inizio caricamento foto da: {:?}", dir_clone);
                 crate::leggi_foto_da_directory_con_progresso(&dir_clone, Some(sender))
+            });
+            
+            self.loading_thread = Some(handle);
+        }
+    }
+    
+    fn avvia_caricamento_foto_multiplo(&mut self) {
+        if !self.directories.is_empty() {
+            self.loading = true;
+            if self.directories.len() == 1 {
+                self.loading_message = format!("Scanning directory: {:?}...", self.directories[0]);
+            } else {
+                self.loading_message = format!("Scanning {} directories...", self.directories.len());
+            }
+            self.loading_progress = None;
+            
+            // Crea canale per comunicare progresso
+            let (sender, receiver) = std::sync::mpsc::channel();
+            self.loading_progress_receiver = Some(receiver);
+            
+            // Avvia il caricamento in un thread separato per tutte le cartelle
+            let dirs_clone = self.directories.clone();
+            let handle = std::thread::spawn(move || {
+                let mut tutte_foto = Vec::new();
+                for dir in dirs_clone {
+                    eprintln!("[DEBUG] Inizio caricamento foto da: {:?}", dir);
+                    let foto = crate::leggi_foto_da_directory_con_progresso(&dir, Some(sender.clone()));
+                    tutte_foto.extend(foto);
+                }
+                tutte_foto
             });
             
             self.loading_thread = Some(handle);
@@ -427,6 +509,28 @@ impl CorrectorApp {
                         return true; // Ha EXIF mancante (già verificato sopra)
                     }
                 }
+                
+                // Filtro per categorie di foto
+                // Se almeno un checkbox è selezionato, mostra SOLO quelle categorie
+                let is_1900 = f.is_foto_1900();
+                let is_whatsapp = f.is_foto_whatsapp();
+                let is_raw = f.is_foto_raw();
+                
+                // Controlla se almeno un filtro categoria è attivo
+                let almeno_un_filtro_attivo = self.mostra_foto_1900 || self.mostra_foto_whatsapp || self.mostra_foto_raw;
+                
+                if almeno_un_filtro_attivo {
+                    // Se almeno un filtro è attivo, mostra SOLO le foto delle categorie selezionate
+                    let categoria_selezionata = 
+                        (is_1900 && self.mostra_foto_1900) ||
+                        (is_whatsapp && self.mostra_foto_whatsapp) ||
+                        (is_raw && self.mostra_foto_raw);
+                    
+                    if !categoria_selezionata {
+                        return false; // Nascondi se non appartiene a nessuna categoria selezionata
+                    }
+                }
+                // Se nessun filtro è attivo, mostra tutte le foto (non filtrare per categoria)
                 
                 // Se mostra_tutte_foto è true, mostra anche quelle senza incongruenze
                 if self.mostra_tutte_foto {
@@ -670,16 +774,25 @@ impl eframe::App for CorrectorApp {
         // Verifica se il caricamento è completato
         self.verifica_caricamento_completato(ctx);
         
-        // Confirmation dialog rimosso - applica direttamente le modifiche
+        // ============================================
+        // PRIMA COLONNA: SIDEPANEL SINISTRO - SOLO SETTING
+        // ============================================
+        let screen_width = ctx.screen_rect().width();
+        let panel_width = screen_width * 0.25; // 25% della larghezza
         
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("EXIF Date Corrector - Rust Version");
-            
+        egui::SidePanel::left("settings_panel_v2")
+            .resizable(true)
+            .default_width(panel_width)
+            .min_width(250.0)
+            .max_width(screen_width * 0.5)
+            .show(ctx, |ui| {
+            ui.heading("EXIF Date Corrector");
             ui.separator();
             
             // Phase 1: Folder selection
-            ui.horizontal(|ui| {
+            ui.group(|ui| {
                 ui.label("Phase 1: Read Folder");
+                ui.separator();
                 if ui.button("Select Folder").clicked() {
                     self.seleziona_cartella();
                 }
@@ -688,47 +801,144 @@ impl eframe::App for CorrectorApp {
                 } else {
                     ui.label("No folder selected");
                 }
-            });
-            
-            // Mostra indicatore di caricamento se sta caricando - MOLTO VISIBILE
-            if self.loading {
-                ui.separator();
-                ui.allocate_ui_with_layout(
-                    egui::Vec2::new(ui.available_width(), 100.0),
-                    egui::Layout::top_down(egui::Align::Center),
-                    |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(10.0);
-                            ui.spinner();
-                            ui.add_space(10.0);
-                            ui.heading(&self.loading_message);
-                            ui.add_space(10.0);
-                            
-                            if let Some((trovate, elaborate)) = self.loading_progress {
-                                if elaborate <= trovate && trovate > 0 {
-                                    let progresso = elaborate as f32 / trovate as f32;
-                                    ui.add(egui::ProgressBar::new(progresso)
-                                        .show_percentage()
-                                        .desired_width(ui.available_width() - 40.0));
-                                    ui.label(format!("Processing: {}/{} photos ({:.1}%)", 
-                                                   elaborate, trovate, progresso * 100.0));
-                                }
-                            } else {
-                                // Progress bar indeterminata durante lo scan
-                                ui.add(egui::ProgressBar::new(0.0)
+                
+                // Mostra indicatore di caricamento se sta caricando
+                if self.loading {
+                    ui.separator();
+                    ui.vertical_centered(|ui| {
+                        ui.spinner();
+                        ui.label(&self.loading_message);
+                        
+                        if let Some((trovate, elaborate)) = self.loading_progress {
+                            if elaborate <= trovate && trovate > 0 {
+                                let progresso = elaborate as f32 / trovate as f32;
+                                ui.add(egui::ProgressBar::new(progresso)
                                     .show_percentage()
-                                    .desired_width(ui.available_width() - 40.0));
-                                ui.label("Scanning directory...");
+                                    .desired_width(ui.available_width() - 20.0));
+                                ui.label(format!("{}/{} ({:.1}%)", elaborate, trovate, progresso * 100.0));
                             }
-                        });
-                    }
-                );
-                ui.separator();
-            }
+                        } else {
+                            ui.add(egui::ProgressBar::new(0.0)
+                                .show_percentage()
+                                .desired_width(ui.available_width() - 20.0));
+                            ui.label("Scanning...");
+                        }
+                    });
+                }
+            });
             
             ui.separator();
             
-            // Filter by severity with slider that adapts to selected unit
+            // Phase 2: Proposal modifications
+            ui.group(|ui| {
+                ui.label("Phase 2: Proposal Modifications");
+                ui.separator();
+                
+                let mut strategia_cambiata = false;
+                
+                ui.label("DateTimeOriginal Strategy:");
+                egui::ComboBox::from_id_source("strategia_dt")
+                    .selected_text(self.strategia_datetime_original.display_name())
+                    .show_ui(ui, |ui| {
+                        for strategia in [
+                            Strategia::JsonPhotoTaken,
+                            Strategia::JsonCreation,
+                            Strategia::NomeFilePreferito,
+                            Strategia::NomeFile,
+                            Strategia::JsonPreferito,
+                            Strategia::ExifAttuale,
+                        ] {
+                            if ui.selectable_value(&mut self.strategia_datetime_original, strategia.clone(), strategia.display_name()).changed() {
+                                strategia_cambiata = true;
+                            }
+                        }
+                    });
+                
+                ui.separator();
+                
+                ui.label("CreateDate Strategy:");
+                egui::ComboBox::from_id_source("strategia_cd")
+                    .selected_text(self.strategia_create_date.display_name())
+                    .show_ui(ui, |ui| {
+                        for strategia in [
+                            Strategia::JsonPhotoTaken,
+                            Strategia::JsonCreation,
+                            Strategia::NomeFilePreferito,
+                            Strategia::NomeFile,
+                            Strategia::JsonPreferito,
+                            Strategia::ExifAttuale,
+                        ] {
+                            if ui.selectable_value(&mut self.strategia_create_date, strategia.clone(), strategia.display_name()).changed() {
+                                strategia_cambiata = true;
+                            }
+                        }
+                    });
+                
+                ui.separator();
+                
+                if strategia_cambiata {
+                    self.calcola_proposte();
+                    self.filtro_dirty = true;
+                }
+                
+                if ui.button("Apply Modifications").clicked() {
+                    // Calcola quante foto hanno proposte diverse dall'EXIF attuale
+                    let foto_con_proposte = self.foto_list.iter()
+                        .filter(|f| {
+                            let ha_proposta_dt = f.proposta_datetime_original.is_some();
+                            let ha_proposta_cd = f.proposta_create_date.is_some();
+                            let cambia_dt = match (f.exif_datetime_original, f.proposta_datetime_original) {
+                                (Some(exif), Some(prop)) => exif != prop,
+                                (None, Some(_)) => true,
+                                _ => false,
+                            };
+                            let cambia_cd = match (f.exif_create_date, f.proposta_create_date) {
+                                (Some(exif), Some(prop)) => exif != prop,
+                                (None, Some(_)) => true,
+                                _ => false,
+                            };
+                            (ha_proposta_dt && cambia_dt) || (ha_proposta_cd && cambia_cd)
+                        })
+                        .count();
+                    
+                    if foto_con_proposte > 0 {
+                        self.foto_da_modificare_count = foto_con_proposte;
+                        // Applica direttamente le modifiche senza dialog di conferma
+                        self.avvia_applicazione_modifiche(ctx);
+                    }
+                }
+                
+                // Show progress bar if applying modifications
+                if self.applicando_modifiche {
+                    ui.separator();
+                    ui.label("Applying modifications...");
+                    let progresso = if self.foto_totali_da_modificare > 0 {
+                        self.foto_modificate as f32 / self.foto_totali_da_modificare as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(egui::ProgressBar::new(progresso).show_percentage());
+                    ui.label(format!("{}/{} photos processed", self.foto_modificate, self.foto_totali_da_modificare));
+                    
+                    // Update progress from shared counter
+                    self.aggiorna_progresso_da_counter(ctx);
+                } else if self.foto_modificate > 0 {
+                    ui.separator();
+                    ui.label(format!("✅ Completed: {} photos modified", self.foto_modificate));
+                    if self.errori_applicazione > 0 {
+                        ui.label(format!("⚠️ Errors: {}", self.errori_applicazione));
+                    }
+                }
+            });
+            
+            ui.separator();
+            
+            // Phase 3: Filters
+            ui.group(|ui| {
+                ui.label("Phase 3: Filters");
+                ui.separator();
+                
+                // Filter by severity with slider that adapts to selected unit
             ui.horizontal(|ui| {
                 ui.label("Filter by minimum severity:");
                 
@@ -837,10 +1047,33 @@ impl eframe::App for CorrectorApp {
             
             ui.separator();
             
-            // Calcola la lista filtrata (usa cache se disponibile)
-            self.calcola_foto_da_mostrare();
+            // Filtri per categorie di foto
+            ui.label("Mostra SOLO queste categorie:");
+            let vecchia_1900 = self.mostra_foto_1900;
+            ui.checkbox(&mut self.mostra_foto_1900, "Foto senza metadati (1900-01-01)");
+            if vecchia_1900 != self.mostra_foto_1900 {
+                self.filtro_dirty = true;
+            }
             
-            // Show threshold in selected unit
+            let vecchia_whatsapp = self.mostra_foto_whatsapp;
+            ui.checkbox(&mut self.mostra_foto_whatsapp, "Foto WhatsApp (IMG_*)");
+            if vecchia_whatsapp != self.mostra_foto_whatsapp {
+                self.filtro_dirty = true;
+            }
+            
+            let vecchia_raw = self.mostra_foto_raw;
+            ui.checkbox(&mut self.mostra_foto_raw, "Foto RAW (ORF/NEF)");
+            if vecchia_raw != self.mostra_foto_raw {
+                self.filtro_dirty = true;
+            }
+            
+            if !self.mostra_foto_1900 && !self.mostra_foto_whatsapp && !self.mostra_foto_raw {
+                ui.label(egui::RichText::new("(Nessun filtro attivo: mostra tutte)").small().weak());
+            }
+            
+            ui.separator();
+            
+            // Show threshold in selected unit (calcola solo per display, non modifica cache)
             let soglia_secondi = (self.soglia_gravita_giorni * 86400.0) as i64;
             let soglia_display = match self.unita_gravita {
                 UnitaGravita::Secondi => format!("{} seconds", soglia_secondi),
@@ -858,7 +1091,15 @@ impl eframe::App for CorrectorApp {
             }
             
             ui.label(format!("Selected photos: {}", self.foto_selezionate.len()));
-            ui.separator();
+            });
+        }); // Fine SidePanel
+        
+        // ============================================
+        // SECONDA COLONNA: CENTRALPANEL - SOLO TABELLA
+        // ============================================
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // Calcola la lista filtrata (usa cache se disponibile)
+            self.calcola_foto_da_mostrare();
             
             // Renderizza header fuori dalla virtualizzazione
             egui::Grid::new("foto_grid_header")
@@ -882,438 +1123,330 @@ impl eframe::App for CorrectorApp {
                         }
                     }
                     // Clickable headers for sorting
-                        let nome_response = ui.selectable_label(
-                            self.colonna_ordinamento == Some(ColonnaOrdinamento::NomeFile),
-                            "File Name"
-                        );
-                        if nome_response.clicked() {
-                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::NomeFile) {
-                                self.ordine_crescente = !self.ordine_crescente;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            } else {
-                                self.colonna_ordinamento = Some(ColonnaOrdinamento::NomeFile);
-                                self.ordine_crescente = true;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            }
+                    let nome_response = ui.selectable_label(
+                        self.colonna_ordinamento == Some(ColonnaOrdinamento::NomeFile),
+                        "File Name"
+                    );
+                    if nome_response.clicked() {
+                        if self.colonna_ordinamento == Some(ColonnaOrdinamento::NomeFile) {
+                            self.ordine_crescente = !self.ordine_crescente;
+                            self.filtro_dirty = true;
+                        } else {
+                            self.colonna_ordinamento = Some(ColonnaOrdinamento::NomeFile);
+                            self.ordine_crescente = true;
+                            self.filtro_dirty = true;
                         }
-                        
-                        let gravita_response = ui.selectable_label(
-                            self.colonna_ordinamento == Some(ColonnaOrdinamento::Gravita),
-                            "Severity"
-                        );
-                        if gravita_response.clicked() {
-                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::Gravita) {
-                                self.ordine_crescente = !self.ordine_crescente;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            } else {
-                                self.colonna_ordinamento = Some(ColonnaOrdinamento::Gravita);
-                                self.ordine_crescente = true;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            }
+                    }
+                    
+                    let gravita_response = ui.selectable_label(
+                        self.colonna_ordinamento == Some(ColonnaOrdinamento::Gravita),
+                        "Severity"
+                    );
+                    if gravita_response.clicked() {
+                        if self.colonna_ordinamento == Some(ColonnaOrdinamento::Gravita) {
+                            self.ordine_crescente = !self.ordine_crescente;
+                            self.filtro_dirty = true;
+                        } else {
+                            self.colonna_ordinamento = Some(ColonnaOrdinamento::Gravita);
+                            self.ordine_crescente = true;
+                            self.filtro_dirty = true;
                         }
-                        
-                        let mut inc_label_text = "Incongruities".to_string();
+                    }
+                    
+                    let mut inc_label_text = "Incongruities".to_string();
+                    if self.colonna_ordinamento == Some(ColonnaOrdinamento::Incongruenze) {
+                        let arrow = if self.ordine_crescente { " ↑" } else { " ↓" };
+                        inc_label_text.push_str(arrow);
+                    }
+                    let inc_header_response = ui.button(inc_label_text);
+                    if inc_header_response.clicked() {
                         if self.colonna_ordinamento == Some(ColonnaOrdinamento::Incongruenze) {
-                            let arrow = if self.ordine_crescente { " ↑" } else { " ↓" };
-                            inc_label_text.push_str(arrow);
+                            self.ordine_crescente = !self.ordine_crescente;
+                            self.filtro_dirty = true;
+                        } else {
+                            self.colonna_ordinamento = Some(ColonnaOrdinamento::Incongruenze);
+                            self.ordine_crescente = true;
+                            self.filtro_dirty = true;
                         }
-                        let inc_header_response = ui.button(inc_label_text);
-                        if inc_header_response.clicked() {
-                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::Incongruenze) {
-                                self.ordine_crescente = !self.ordine_crescente;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            } else {
-                                self.colonna_ordinamento = Some(ColonnaOrdinamento::Incongruenze);
-                                self.ordine_crescente = true;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            }
+                    }
+                    
+                    let dt_response = ui.selectable_label(
+                        self.colonna_ordinamento == Some(ColonnaOrdinamento::DateTimeOriginal),
+                        "DateTimeOriginal ⭐"
+                    );
+                    if dt_response.clicked() {
+                        if self.colonna_ordinamento == Some(ColonnaOrdinamento::DateTimeOriginal) {
+                            self.ordine_crescente = !self.ordine_crescente;
+                            self.filtro_dirty = true;
+                        } else {
+                            self.colonna_ordinamento = Some(ColonnaOrdinamento::DateTimeOriginal);
+                            self.ordine_crescente = true;
+                            self.filtro_dirty = true;
                         }
-                        
-                        let dt_response = ui.selectable_label(
-                            self.colonna_ordinamento == Some(ColonnaOrdinamento::DateTimeOriginal),
-                            "DateTimeOriginal ⭐"
-                        );
-                        if dt_response.clicked() {
-                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::DateTimeOriginal) {
-                                self.ordine_crescente = !self.ordine_crescente;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            } else {
-                                self.colonna_ordinamento = Some(ColonnaOrdinamento::DateTimeOriginal);
-                                self.ordine_crescente = true;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            }
+                    }
+                    
+                    ui.label("→ Proposal");
+                    
+                    let cd_response = ui.selectable_label(
+                        self.colonna_ordinamento == Some(ColonnaOrdinamento::CreateDate),
+                        "CreateDate"
+                    );
+                    if cd_response.clicked() {
+                        if self.colonna_ordinamento == Some(ColonnaOrdinamento::CreateDate) {
+                            self.ordine_crescente = !self.ordine_crescente;
+                            self.filtro_dirty = true;
+                        } else {
+                            self.colonna_ordinamento = Some(ColonnaOrdinamento::CreateDate);
+                            self.ordine_crescente = true;
+                            self.filtro_dirty = true;
                         }
-                        
-                        ui.label("→ Proposal");
-                        
-                        let cd_response = ui.selectable_label(
-                            self.colonna_ordinamento == Some(ColonnaOrdinamento::CreateDate),
-                            "CreateDate"
-                        );
-                        if cd_response.clicked() {
-                            if self.colonna_ordinamento == Some(ColonnaOrdinamento::CreateDate) {
-                                self.ordine_crescente = !self.ordine_crescente;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            } else {
-                                self.colonna_ordinamento = Some(ColonnaOrdinamento::CreateDate);
-                                self.ordine_crescente = true;
-                                self.filtro_dirty = true; // Ordinamento cambiato
-                            }
-                        }
-                        
+                    }
+                    
                     ui.label("→ Proposal");
                     ui.end_row();
                 });
             
-            // Usa virtualizzazione per renderizzare solo le righe visibili
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show_rows(ui, 25.0, self.foto_da_mostrare_cached.len(), |ui, row_range| {
-                    egui::Grid::new("foto_grid_rows")
-                        .num_columns(8)
-                        .spacing([10.0, 4.0])
-                        .show(ui, |ui| {
-                            // Renderizza solo le righe nel range visibile
-                            for idx_in_list in row_range {
-                                if let Some((idx_originale, foto)) = self.foto_da_mostrare_cached.get(idx_in_list) {
-                                    let idx_grid = idx_in_list;
-                            
-                            let mut is_selected = self.foto_selezionate.contains(&idx_originale);
-                            
-                            // Checkbox for selection with Ctrl/Shift handling
-                            let checkbox_response = ui.checkbox(&mut is_selected, "");
-                            
-                            if checkbox_response.changed() {
-                                let input = ui.input(|i| i.clone());
-                                let ctrl_pressed = input.modifiers.ctrl;
-                                let shift_pressed = input.modifiers.shift;
-                                
-                                if shift_pressed && self.ultimo_indice_selezionato.is_some() {
-                                    // Shift+click: select range
-                                    let ultimo_idx = self.ultimo_indice_selezionato.unwrap();
-                                    let start_idx = self.foto_da_mostrare_cached.iter()
-                                        .position(|(idx, _)| *idx == ultimo_idx)
-                                        .unwrap_or(0);
-                                    let end_idx = idx_grid;
-                                    let (start, end) = if start_idx < end_idx {
-                                        (start_idx, end_idx)
-                                    } else {
-                                        (end_idx, start_idx)
-                                    };
-                                    
-                                    for i in start..=end {
-                                        if let Some((idx, _)) = self.foto_da_mostrare_cached.get(i) {
-                                            self.foto_selezionate.insert(*idx);
+            // Frame scuro per la tabella
+            egui::Frame::default()
+                .fill(egui::Color32::from_rgb(30, 30, 30))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)))
+                .inner_margin(egui::Margin::same(2.0))
+                .show(ui, |ui| {
+                    // ScrollArea che occupa tutto lo spazio verticale disponibile
+                    // Usa show_rows per avere controllo migliore sulla scrollbar
+                    let available_height = ui.available_height();
+                    let row_height = 25.0;
+                    
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(available_height)
+                        .show_rows(ui, row_height, self.foto_da_mostrare_cached.len(), |ui, row_range| {
+                            // Renderizza solo le righe visibili (virtualizzazione)
+                            egui::Grid::new("foto_grid_rows")
+                                .num_columns(8)
+                                .spacing([10.0, 4.0])
+                                .show(ui, |ui| {
+                                    // Renderizza solo le righe nel range visibile
+                                    for idx_in_list in row_range {
+                                        if let Some((idx_originale, foto)) = self.foto_da_mostrare_cached.get(idx_in_list) {
+                                            let idx_grid = idx_in_list;
+                                            
+                                            // Alterna colore di sfondo per righe pari/dispari (scuro)
+                                            if idx_in_list % 2 == 0 {
+                                                ui.painter().rect_filled(
+                                                    ui.available_rect_before_wrap(),
+                                                    0.0,
+                                                    egui::Color32::from_rgba_unmultiplied(40, 40, 45, 255)
+                                                );
+                                            }
+                                        
+                                            let mut is_selected = self.foto_selezionate.contains(idx_originale);
+                                            
+                                            // Checkbox for selection with Ctrl/Shift handling
+                                            let checkbox_response = ui.checkbox(&mut is_selected, "");
+                                            
+                                            if checkbox_response.changed() {
+                                                let input = ui.input(|i| i.clone());
+                                                let ctrl_pressed = input.modifiers.ctrl;
+                                                let shift_pressed = input.modifiers.shift;
+                                                
+                                                if shift_pressed && self.ultimo_indice_selezionato.is_some() {
+                                                    // Shift+click: select range
+                                                    let ultimo_idx = self.ultimo_indice_selezionato.unwrap();
+                                                    let start_idx = self.foto_da_mostrare_cached.iter()
+                                                        .position(|(idx, _)| *idx == ultimo_idx)
+                                                        .unwrap_or(0);
+                                                    let end_idx = idx_grid;
+                                                    let (start, end) = if start_idx < end_idx {
+                                                        (start_idx, end_idx)
+                                                    } else {
+                                                        (end_idx, start_idx)
+                                                    };
+                                                    
+                                                    for i in start..=end {
+                                                        if let Some((idx, _)) = self.foto_da_mostrare_cached.get(i) {
+                                                            self.foto_selezionate.insert(*idx);
+                                                        }
+                                                    }
+                                                    self.ultimo_indice_selezionato = Some(*idx_originale);
+                                                } else if ctrl_pressed {
+                                                    // Ctrl+click: add/remove single photo
+                                                    if is_selected {
+                                                        self.foto_selezionate.insert(*idx_originale);
+                                                    } else {
+                                                        self.foto_selezionate.remove(idx_originale);
+                                                    }
+                                                    self.ultimo_indice_selezionato = Some(*idx_originale);
+                                                } else {
+                                                    // Normal click: select only this photo
+                                                    self.foto_selezionate.clear();
+                                                    self.foto_selezionate.insert(*idx_originale);
+                                                    self.ultimo_indice_selezionato = Some(*idx_originale);
+                                                }
+                                            } else if is_selected {
+                                                // Keep selected state
+                                                self.foto_selezionate.insert(*idx_originale);
+                                            } else {
+                                                self.foto_selezionate.remove(idx_originale);
+                                            }
+                                            
+                                            // Highlight row if selected
+                                            if is_selected {
+                                                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(100, 150, 255));
+                                            }
+                                            
+                                            // File name - make it clickable for double click
+                                            let nome_response = ui.selectable_label(false, &foto.nome_file);
+                                            
+                                            // Handle double click on file name to open photo
+                                            if nome_response.double_clicked() {
+                                                let foto_path = foto.path.clone();
+                                                std::thread::spawn(move || {
+                                                    let _ = std::process::Command::new("xdg-open")
+                                                        .arg(&foto_path)
+                                                        .spawn();
+                                                });
+                                            }
+                                            
+                                            // Severity with thermometric scale
+                                            let giorni_diff = foto.gravita_incongruenza;
+                                            let gravita_text = if foto.incongruenze.is_empty() {
+                                                "None".to_string()
+                                            } else if giorni_diff == 0 {
+                                                "OK".to_string()
+                                            } else if giorni_diff < 30 {
+                                                format!("{} days", giorni_diff)
+                                            } else if giorni_diff < 365 {
+                                                format!("{} months", giorni_diff / 30)
+                                            } else {
+                                                format!("{} years", giorni_diff / 365)
+                                            };
+                                            
+                                            // Calculate thermometric color (green -> yellow -> red)
+                                            let colore = if foto.incongruenze.is_empty() {
+                                                egui::Color32::from_rgb(150, 150, 150) // Gray for no incongruity
+                                            } else if giorni_diff == 0 {
+                                                egui::Color32::from_rgb(0, 200, 0) // Green
+                                            } else if giorni_diff < 30 {
+                                                egui::Color32::from_rgb(100, 200, 0) // Green-yellow
+                                            } else if giorni_diff < 90 {
+                                                egui::Color32::from_rgb(200, 200, 0) // Yellow
+                                            } else if giorni_diff < 365 {
+                                                egui::Color32::from_rgb(255, 150, 0) // Orange
+                                            } else {
+                                                egui::Color32::from_rgb(255, 0, 0) // Red
+                                            };
+                                            
+                                            ui.visuals_mut().override_text_color = Some(colore);
+                                            ui.label(gravita_text);
+                                            ui.visuals_mut().override_text_color = None;
+                                            
+                                            // Incongruities - show "None" if empty, otherwise make it clickable
+                                            let inc_text = if foto.incongruenze.is_empty() {
+                                                "None".to_string()
+                                            } else {
+                                                foto.incongruenze.join("; ")
+                                            };
+                                            
+                                            // If there are incongruities, make the text clickable to open JSON
+                                            if !foto.incongruenze.is_empty() {
+                                                let inc_response = ui.selectable_label(false, &inc_text);
+                                                if inc_response.clicked() {
+                                                    // Find corresponding JSON file
+                                                    let json_path = crate::trova_file_json(&foto.path);
+                                                    if let Some(json_path) = json_path {
+                                                        let json_path_clone = json_path.clone();
+                                                        std::thread::spawn(move || {
+                                                            let _ = std::process::Command::new("xdg-open")
+                                                                .arg(&json_path_clone)
+                                                                .spawn();
+                                                        });
+                                                    }
+                                                }
+                                            } else {
+                                                ui.label(inc_text);
+                                            }
+                                            
+                                            // Current DateTimeOriginal
+                                            if let Some(dt) = foto.exif_datetime_original {
+                                                ui.label(dt.format("%Y-%m-%d %H:%M:%S").to_string());
+                                            } else {
+                                                ui.label("❌");
+                                            }
+                                            
+                                            // DateTimeOriginal proposal
+                                            if let Some(dt_proposta) = foto.proposta_datetime_original {
+                                                let testo_proposta = format!("→ {}", dt_proposta.format("%Y-%m-%d %H:%M:%S"));
+                                                // Check if this is the "flag" date 1900-01-01 for photos without metadata
+                                                let is_flag_date = dt_proposta.year() == 1900 && dt_proposta.month() == 1 && dt_proposta.day() == 1;
+                                                
+                                                if is_flag_date {
+                                                    // Red/purple color to indicate this is a flag date for manual classification
+                                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 0, 255)); // Magenta
+                                                } else {
+                                                    // Compare with current EXIF to decide color
+                                                    let cambia = match foto.exif_datetime_original {
+                                                        Some(dt_exif) => dt_exif != dt_proposta,
+                                                        None => true, // If EXIF missing, consider it as a change
+                                                    };
+                                                    if cambia {
+                                                        // Orange color to indicate modification
+                                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Orange
+                                                    } else {
+                                                        // Gray if no change
+                                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Gray
+                                                    }
+                                                }
+                                                ui.label(testo_proposta);
+                                                ui.visuals_mut().override_text_color = None; // Reset
+                                            } else {
+                                                ui.label("-");
+                                            }
+                                            
+                                            // Current CreateDate
+                                            if let Some(dt) = foto.exif_create_date {
+                                                ui.label(dt.format("%Y-%m-%d %H:%M:%S").to_string());
+                                            } else {
+                                                ui.label("❌");
+                                            }
+                                            
+                                            // CreateDate proposal
+                                            if let Some(dt_proposta) = foto.proposta_create_date {
+                                                let testo_proposta = format!("→ {}", dt_proposta.format("%Y-%m-%d %H:%M:%S"));
+                                                // Check if this is the "flag" date 1900-01-01 for photos without metadata
+                                                let is_flag_date = dt_proposta.year() == 1900 && dt_proposta.month() == 1 && dt_proposta.day() == 1;
+                                                
+                                                if is_flag_date {
+                                                    // Red/purple color to indicate this is a flag date for manual classification
+                                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 0, 255)); // Magenta
+                                                } else {
+                                                    // Compare with current EXIF to decide color
+                                                    let cambia = match foto.exif_create_date {
+                                                        Some(dt_exif) => dt_exif != dt_proposta,
+                                                        None => true, // If EXIF missing, consider it as a change
+                                                    };
+                                                    if cambia {
+                                                        // Orange color to indicate modification
+                                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Orange
+                                                    } else {
+                                                        // Gray if no change
+                                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Gray
+                                                    }
+                                                }
+                                                ui.label(testo_proposta);
+                                                ui.visuals_mut().override_text_color = None; // Reset
+                                            } else {
+                                                ui.label("-");
+                                            }
+                                            
+                                            // Reset color at end of row
+                                            ui.visuals_mut().override_text_color = None;
+                                            ui.end_row();
                                         }
                                     }
-                                    self.ultimo_indice_selezionato = Some(*idx_originale);
-                                } else if ctrl_pressed {
-                                    // Ctrl+click: add/remove single photo
-                                    if is_selected {
-                                        self.foto_selezionate.insert(*idx_originale);
-                                    } else {
-                                        self.foto_selezionate.remove(idx_originale);
-                                    }
-                                    self.ultimo_indice_selezionato = Some(*idx_originale);
-                                } else {
-                                    // Normal click: select only this photo
-                                    self.foto_selezionate.clear();
-                                    self.foto_selezionate.insert(*idx_originale);
-                                    self.ultimo_indice_selezionato = Some(*idx_originale);
-                                }
-                            } else if is_selected {
-                                // Keep selected state
-                                self.foto_selezionate.insert(*idx_originale);
-                            } else {
-                                self.foto_selezionate.remove(idx_originale);
-                            }
-                            
-                            // Highlight row if selected
-                            if is_selected {
-                                ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(100, 150, 255));
-                            }
-                            
-                            // File name - make it clickable for double click
-                            let nome_response = ui.selectable_label(false, &foto.nome_file);
-                            
-                            // Handle double click on file name to open photo
-                            if nome_response.double_clicked() {
-                                let foto_path = foto.path.clone();
-                                std::thread::spawn(move || {
-                                    let _ = std::process::Command::new("xdg-open")
-                                        .arg(&foto_path)
-                                        .spawn();
                                 });
-                            }
-                            
-                            // Severity with thermometric scale
-                            let giorni_diff = foto.gravita_incongruenza;
-                            let gravita_text = if foto.incongruenze.is_empty() {
-                                "None".to_string()
-                            } else if giorni_diff == 0 {
-                                "OK".to_string()
-                            } else if giorni_diff < 30 {
-                                format!("{} days", giorni_diff)
-                            } else if giorni_diff < 365 {
-                                format!("{} months", giorni_diff / 30)
-                            } else {
-                                format!("{} years", giorni_diff / 365)
-                            };
-                            
-                            // Calculate thermometric color (green -> yellow -> red)
-                            let colore = if foto.incongruenze.is_empty() {
-                                egui::Color32::from_rgb(150, 150, 150) // Gray for no incongruity
-                            } else if giorni_diff == 0 {
-                                egui::Color32::from_rgb(0, 200, 0) // Green
-                            } else if giorni_diff < 30 {
-                                egui::Color32::from_rgb(100, 200, 0) // Green-yellow
-                            } else if giorni_diff < 90 {
-                                egui::Color32::from_rgb(200, 200, 0) // Yellow
-                            } else if giorni_diff < 365 {
-                                egui::Color32::from_rgb(255, 150, 0) // Orange
-                            } else {
-                                egui::Color32::from_rgb(255, 0, 0) // Red
-                            };
-                            
-                            ui.visuals_mut().override_text_color = Some(colore);
-                            ui.label(gravita_text);
-                            ui.visuals_mut().override_text_color = None;
-                            
-                            // Incongruities - show "None" if empty, otherwise make it clickable
-                            let inc_text = if foto.incongruenze.is_empty() {
-                                "None".to_string()
-                            } else {
-                                foto.incongruenze.join("; ")
-                            };
-                            
-                            // If there are incongruities, make the text clickable to open JSON
-                            if !foto.incongruenze.is_empty() {
-                                let inc_response = ui.selectable_label(false, &inc_text);
-                                if inc_response.clicked() {
-                                    // Find corresponding JSON file
-                                    let json_path = crate::trova_file_json(&foto.path);
-                                    if let Some(json_path) = json_path {
-                                        let json_path_clone = json_path.clone();
-                                        std::thread::spawn(move || {
-                                            let _ = std::process::Command::new("xdg-open")
-                                                .arg(&json_path_clone)
-                                                .spawn();
-                                        });
-                                    }
-                                }
-                            } else {
-                                ui.label(inc_text);
-                            }
-                            
-                            // Current DateTimeOriginal
-                            if let Some(dt) = foto.exif_datetime_original {
-                                ui.label(dt.format("%Y-%m-%d %H:%M:%S").to_string());
-                            } else {
-                                ui.label("❌");
-                            }
-                            
-                            // DateTimeOriginal proposal
-                            if let Some(dt_proposta) = foto.proposta_datetime_original {
-                                let testo_proposta = format!("→ {}", dt_proposta.format("%Y-%m-%d %H:%M:%S"));
-                                // Check if this is the "flag" date 1900-01-01 for photos without metadata
-                                let is_flag_date = dt_proposta.year() == 1900 && dt_proposta.month() == 1 && dt_proposta.day() == 1;
-                                
-                                if is_flag_date {
-                                    // Red/purple color to indicate this is a flag date for manual classification
-                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 0, 255)); // Magenta
-                                } else {
-                                    // Compare with current EXIF to decide color
-                                    let cambia = match foto.exif_datetime_original {
-                                        Some(dt_exif) => dt_exif != dt_proposta,
-                                        None => true, // If EXIF missing, consider it as a change
-                                    };
-                                    if cambia {
-                                        // Orange color to indicate modification
-                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Orange
-                                    } else {
-                                        // Gray if no change
-                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Gray
-                                    }
-                                }
-                                ui.label(testo_proposta);
-                                ui.visuals_mut().override_text_color = None; // Reset
-                            } else {
-                                ui.label("-");
-                            }
-                            
-                            // Current CreateDate
-                            if let Some(dt) = foto.exif_create_date {
-                                ui.label(dt.format("%Y-%m-%d %H:%M:%S").to_string());
-                            } else {
-                                ui.label("❌");
-                            }
-                            
-                            // CreateDate proposal
-                            if let Some(dt_proposta) = foto.proposta_create_date {
-                                let testo_proposta = format!("→ {}", dt_proposta.format("%Y-%m-%d %H:%M:%S"));
-                                // Check if this is the "flag" date 1900-01-01 for photos without metadata
-                                let is_flag_date = dt_proposta.year() == 1900 && dt_proposta.month() == 1 && dt_proposta.day() == 1;
-                                
-                                if is_flag_date {
-                                    // Red/purple color to indicate this is a flag date for manual classification
-                                    ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 0, 255)); // Magenta
-                                } else {
-                                    // Compare with current EXIF to decide color
-                                    let cambia = match foto.exif_create_date {
-                                        Some(dt_exif) => dt_exif != dt_proposta,
-                                        None => true, // If EXIF missing, consider it as a change
-                                    };
-                                    if cambia {
-                                        // Orange color to indicate modification
-                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(255, 165, 0)); // Orange
-                                    } else {
-                                        // Gray if no change
-                                        ui.visuals_mut().override_text_color = Some(egui::Color32::from_rgb(150, 150, 150)); // Gray
-                                    }
-                                }
-                                ui.label(testo_proposta);
-                                ui.visuals_mut().override_text_color = None; // Reset
-                            } else {
-                                ui.label("-");
-                            }
-                            
-                                    // Reset color at end of row
-                                    ui.visuals_mut().override_text_color = None;
-                                    ui.end_row();
-                                }
-                            }
                         });
                 });
-        });
-        
-        // Right side panel
-        egui::SidePanel::right("controlli").show(ctx, |ui| {
-            ui.heading("Controls");
-            
-            ui.separator();
-            
-            // Phase 2: Proposal modifications
-            ui.group(|ui| {
-                ui.label("Phase 2: Proposal Modifications");
-                ui.separator();
-                
-                let mut strategia_cambiata = false;
-                
-                ui.label("DateTimeOriginal ⭐ Strategy:");
-                egui::ComboBox::from_id_source("strategia_dt")
-                    .selected_text(self.strategia_datetime_original.display_name())
-                    .show_ui(ui, |ui| {
-                        for strategia in [
-                            Strategia::JsonPhotoTaken,
-                            Strategia::JsonCreation,
-                            Strategia::NomeFilePreferito,
-                            Strategia::NomeFile,
-                            Strategia::JsonPreferito,
-                            Strategia::ExifAttuale,
-                        ] {
-                            if ui.selectable_value(&mut self.strategia_datetime_original, strategia.clone(), strategia.display_name()).changed() {
-                                strategia_cambiata = true;
-                            }
-                        }
-                    });
-                
-                ui.separator();
-                
-                ui.label("CreateDate Strategy:");
-                egui::ComboBox::from_id_source("strategia_cd")
-                    .selected_text(self.strategia_create_date.display_name())
-                    .show_ui(ui, |ui| {
-                        for strategia in [
-                            Strategia::JsonPhotoTaken,
-                            Strategia::JsonCreation,
-                            Strategia::NomeFilePreferito,
-                            Strategia::NomeFile,
-                            Strategia::JsonPreferito,
-                            Strategia::ExifAttuale,
-                        ] {
-                            if ui.selectable_value(&mut self.strategia_create_date, strategia.clone(), strategia.display_name()).changed() {
-                                strategia_cambiata = true;
-                            }
-                        }
-                    });
-                
-                ui.separator();
-                
-                // If any strategy changed, automatically recalculate proposals
-                if strategia_cambiata {
-                    self.calcola_proposte();
-                }
-                
-                ui.label("Proposals are automatically recalculated when you change strategies.");
-            });
-            
-            ui.separator();
-            
-            // Phase 3: Apply modifications
-            ui.group(|ui| {
-                ui.label("Phase 3: Apply Modifications");
-                ui.separator();
-                
-                ui.label("Modifications will be applied only to selected photos.");
-                ui.label("Each EXIF field can have an independent strategy.");
-                
-                let foto_selezionate_count = self.foto_selezionate.len();
-                if foto_selezionate_count == 0 {
-                    ui.label("⚠️ No photos selected!");
-                } else {
-                    ui.label(format!("✅ {} photos selected", foto_selezionate_count));
-                }
-                
-                if ui.button("Apply Modifications").clicked() {
-                    if foto_selezionate_count > 0 {
-                        // Calculate how many selected photos actually have proposals to apply
-                        let foto_con_proposte = self.foto_list
-                            .iter()
-                            .enumerate()
-                            .filter(|(idx, f)| {
-                                self.foto_selezionate.contains(idx) && (
-                                    f.proposta_datetime_original.is_some() ||
-                                    f.proposta_create_date.is_some()
-                                )
-                            })
-                            .count();
-                        
-                        if foto_con_proposte > 0 {
-                            self.foto_da_modificare_count = foto_con_proposte;
-                            // Applica direttamente le modifiche senza dialog di conferma
-                            self.avvia_applicazione_modifiche(ctx);
-                        }
-                    }
-                }
-                
-                // Show progress bar if applying modifications
-                if self.applicando_modifiche {
-                    ui.separator();
-                    ui.label("Applying modifications...");
-                    let progresso = if self.foto_totali_da_modificare > 0 {
-                        self.foto_modificate as f32 / self.foto_totali_da_modificare as f32
-                    } else {
-                        0.0
-                    };
-                    ui.add(egui::ProgressBar::new(progresso).show_percentage());
-                    ui.label(format!("{}/{} photos processed", self.foto_modificate, self.foto_totali_da_modificare));
-                    
-                    // Update progress from shared counter
-                    self.aggiorna_progresso_da_counter(ctx);
-                } else if self.foto_modificate > 0 {
-                    ui.separator();
-                    ui.label(format!("✅ Completed: {} photos modified", self.foto_modificate));
-                    if self.errori_applicazione > 0 {
-                        ui.label(format!("⚠️ Errors: {}", self.errori_applicazione));
-                    }
-                }
-            });
-            
-            ui.separator();
-            
-            // Statistiche
-            ui.label("Statistiche:");
-            ui.label(&self.stats);
         });
     }
 }
