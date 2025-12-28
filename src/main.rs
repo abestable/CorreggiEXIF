@@ -129,6 +129,42 @@ pub fn estrai_anno_da_nome(nome_file: &str) -> Option<(i32, u32, u32)> {
         }
     }
     
+    // Pattern: "1987-07" o "1987_07" (anno-mese)
+    let re = Regex::new(r"(\d{4})[_-](\d{1,2})").ok()?;
+    if let Some(caps) = re.captures(nome_file) {
+        if let Ok(anno) = caps[1].parse::<i32>() {
+            if let Ok(mese) = caps[2].parse::<u32>() {
+                if (1900..=2100).contains(&anno) && (1..=12).contains(&mese) {
+                    return Some((anno, mese, 1)); // Usa giorno 1 come default
+                }
+            }
+        }
+    }
+    
+    // Pattern: "07-1987" o "7-1987" (mese-anno)
+    let re = Regex::new(r"(\d{1,2})[_-](\d{4})").ok()?;
+    if let Some(caps) = re.captures(nome_file) {
+        if let Ok(mese) = caps[1].parse::<u32>() {
+            if let Ok(anno) = caps[2].parse::<i32>() {
+                if (1900..=2100).contains(&anno) && (1..=12).contains(&mese) {
+                    return Some((anno, mese, 1)); // Usa giorno 1 come default
+                }
+            }
+        }
+    }
+    
+    // Pattern: solo anno a 4 cifre nel nome (es: "Foppolo 1987.jpg", "Sigurtà 1987.jpg")
+    // Questo pattern viene per ultimo, dopo tutti i pattern più specifici
+    // Cerca un anno valido preceduto da spazio o altro carattere non numerico
+    let re = Regex::new(r"[^\d](\d{4})(?:\s|\.|$|[^\d])").ok()?;
+    if let Some(caps) = re.captures(nome_file) {
+        if let Ok(anno) = caps[1].parse::<i32>() {
+            if (1900..=2100).contains(&anno) {
+                return Some((anno, 1, 1));
+            }
+        }
+    }
+    
     None
 }
 
