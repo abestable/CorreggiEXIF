@@ -80,6 +80,10 @@ pub struct CorrectorApp {
     // Sorting
     colonna_ordinamento: Option<ColonnaOrdinamento>,
     ordine_crescente: bool,
+    // Cached filtered list for performance
+    foto_da_mostrare_cached: Vec<(usize, FotoData)>, // (indice_originale, foto)
+    filtro_dirty: bool, // True when filters changed and cache needs refresh
+    path_to_index: std::collections::HashMap<PathBuf, usize>, // Fast lookup map
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -187,6 +191,9 @@ impl CorrectorApp {
             filtro_incongruenza: FiltroIncongruenza::Tutte,
             colonna_ordinamento: None,
             ordine_crescente: true,
+            foto_da_mostrare_cached: Vec::new(),
+            filtro_dirty: true,
+            path_to_index: std::collections::HashMap::new(),
         }
     }
     
@@ -289,12 +296,130 @@ impl CorrectorApp {
         if let Some(ref dir) = self.directory {
             // Carica le foto (veloce con Rust!)
             self.foto_list = leggi_foto_da_directory(dir);
+            // Ricostruisci la mappa path->indice per lookup veloce
+            self.path_to_index.clear();
+            for (idx, foto) in self.foto_list.iter().enumerate() {
+                self.path_to_index.insert(foto.path.clone(), idx);
+            }
             // Ricalcola le proposte con le strategie corrette della GUI
             // (le foto vengono caricate con strategia di default "nome_file_preferito",
             // ma la GUI usa "JsonPhotoTaken" di default)
+            // IMPORTANTE: ricalcola sempre le proposte quando si caricano le foto
+            // per assicurarsi che usino le strategie corrette della GUI
             self.calcola_proposte();
             self.aggiorna_statistiche();
+            self.filtro_dirty = true; // Segna che il filtro deve essere ricalcolato
         }
+    }
+    
+    fn calcola_foto_da_mostrare(&mut self) {
+        if !self.filtro_dirty && !self.foto_da_mostrare_cached.is_empty() {
+            return; // Cache ancora valida
+        }
+        
+        let soglia_secondi = (self.soglia_gravita_giorni * 86400.0) as i64;
+        
+        // Filtra le foto mantenendo l'indice originale
+        let mut foto_filtrate: Vec<(usize, &FotoData)> = self.foto_list
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                // Filtro principale: solo EXIF mancante se abilitato
+                if self.solo_exif_mancante {
+                    // Mostra solo foto con DateTimeOriginal E CreateDate ENTRAMBI mancanti
+                    if f.exif_datetime_original.is_some() || f.exif_create_date.is_some() {
+                        return false; // Ha almeno uno dei campi EXIF, quindi escludi
+                    }
+                }
+                
+                // Filtro per tipo di incongruenza (solo se ci sono incongruenze)
+                if !f.incongruenze.is_empty() {
+                    if !self.filtro_incongruenza.matches(f) {
+                        return false;
+                    }
+                } else {
+                    // Se non ci sono incongruenze, mostra solo se:
+                    // - mostra_tutte_foto è true, OPPURE
+                    // - solo_exif_mancante è true (per mostrare quelle con EXIF mancante anche senza incongruenze)
+                    if !self.mostra_tutte_foto && !self.solo_exif_mancante {
+                        return false;
+                    }
+                    // Se solo_exif_mancante è true ma non ci sono incongruenze,
+                    // mostra solo se ha EXIF mancante (già controllato sopra)
+                    if self.solo_exif_mancante {
+                        return true; // Ha EXIF mancante (già verificato sopra)
+                    }
+                }
+                
+                // Se mostra_tutte_foto è true, mostra anche quelle senza incongruenze
+                if self.mostra_tutte_foto {
+                    if f.incongruenze.is_empty() {
+                        return true; // Mostra anche quelle senza incongruenze
+                    }
+                    // Per quelle con incongruenze, applica il filtro sulla soglia
+                    let gravita_secondi = (f.gravita_incongruenza as f64 * 86400.0) as i64;
+                    gravita_secondi >= soglia_secondi
+                } else {
+                    // Mostra solo quelle con incongruenze che superano la soglia
+                    if f.incongruenze.is_empty() {
+                        // Se solo_exif_mancante è true, mostra anche quelle con EXIF mancante senza incongruenze
+                        if self.solo_exif_mancante {
+                            return true;
+                        }
+                        return false;
+                    }
+                    // Converti la gravità della foto in secondi per il confronto
+                    let gravita_secondi = (f.gravita_incongruenza as f64 * 86400.0) as i64;
+                    gravita_secondi >= soglia_secondi
+                }
+            })
+            .collect();
+        
+        // Applica ordinamento se selezionato
+        if let Some(colonna) = self.colonna_ordinamento {
+            foto_filtrate.sort_by(|(_, a), (_, b)| {
+                let cmp = match colonna {
+                    ColonnaOrdinamento::NomeFile => {
+                        a.nome_file.cmp(&b.nome_file)
+                    }
+                    ColonnaOrdinamento::Gravita => {
+                        a.gravita_incongruenza.cmp(&b.gravita_incongruenza)
+                    }
+                    ColonnaOrdinamento::Incongruenze => {
+                        a.incongruenze.len().cmp(&b.incongruenze.len())
+                    }
+                    ColonnaOrdinamento::DateTimeOriginal => {
+                        match (a.exif_datetime_original, b.exif_datetime_original) {
+                            (Some(dt_a), Some(dt_b)) => dt_a.cmp(&dt_b),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        }
+                    }
+                    ColonnaOrdinamento::CreateDate => {
+                        match (a.exif_create_date, b.exif_create_date) {
+                            (Some(dt_a), Some(dt_b)) => dt_a.cmp(&dt_b),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        }
+                    }
+                };
+                
+                if self.ordine_crescente {
+                    cmp
+                } else {
+                    cmp.reverse()
+                }
+            });
+        }
+        
+        // Converti in owned data per la cache
+        self.foto_da_mostrare_cached = foto_filtrate.into_iter()
+            .map(|(idx, foto)| (idx, foto.clone()))
+            .collect();
+        
+        self.filtro_dirty = false;
     }
     
     fn calcola_proposte(&mut self) {
@@ -309,6 +434,7 @@ impl CorrectorApp {
             foto.incongruenze = crate::rileva_incongruenze(foto);
             foto.gravita_incongruenza = crate::calcola_gravita_incongruenza(foto);
         }
+        self.filtro_dirty = true; // Le proposte cambiate possono influenzare il filtro
     }
     
     fn avvia_applicazione_modifiche(&mut self, _ctx: &egui::Context) {
@@ -423,15 +549,22 @@ impl CorrectorApp {
                 
                 self.foto_list = leggi_foto_da_directory(dir);
                 
+                // Ricostruisci la mappa path->indice
+                self.path_to_index.clear();
+                for (idx, foto) in self.foto_list.iter().enumerate() {
+                    self.path_to_index.insert(foto.path.clone(), idx);
+                }
+                
                 // Restore selections based on path
                 self.foto_selezionate.clear();
-                for (idx, foto) in self.foto_list.iter().enumerate() {
-                    if vecchie_selezioni.contains(&foto.path) {
+                for path in vecchie_selezioni {
+                    if let Some(&idx) = self.path_to_index.get(&path) {
                         self.foto_selezionate.insert(idx);
                     }
                 }
                 
                 self.aggiorna_statistiche();
+                self.filtro_dirty = true; // Ricalcola il filtro dopo il reload
             }
         }
     }
@@ -513,13 +646,18 @@ impl eframe::App for CorrectorApp {
                 
                 // Convert selected unit value to days (but maintains precision up to seconds)
                 // Value is converted to days, but can represent fractions of seconds
+                let vecchio_valore = self.soglia_gravita_giorni;
                 let nuovo_valore_giorni = self.unita_gravita.to_giorni(valore_unita);
                 // Ensure it's not negative (minimum 0 seconds = 0 days)
                 self.soglia_gravita_giorni = nuovo_valore_giorni.max(0.0);
+                if (vecchio_valore - self.soglia_gravita_giorni).abs() > 0.001 {
+                    self.filtro_dirty = true; // Soglia cambiata
+                }
             });
             
             ui.horizontal(|ui| {
                 ui.label("Unit:");
+                let vecchia_unita = self.unita_gravita;
                 egui::ComboBox::from_id_source("unita_gravita")
                     .selected_text(self.unita_gravita.display_name())
                     .show_ui(ui, |ui| {
@@ -534,16 +672,24 @@ impl eframe::App for CorrectorApp {
                             ui.selectable_value(&mut self.unita_gravita, unita, unita.display_name());
                         }
                     });
+                if vecchia_unita != self.unita_gravita {
+                    self.filtro_dirty = true; // Unità cambiata (anche se la soglia è la stessa, il display cambia)
+                }
             });
             
             ui.separator();
             
             // Checkbox to show only photos with missing EXIF (checked by default)
+            let vecchio_solo_exif = self.solo_exif_mancante;
             ui.checkbox(&mut self.solo_exif_mancante, "Mostra solo foto con EXIF mancante");
+            if vecchio_solo_exif != self.solo_exif_mancante {
+                self.filtro_dirty = true;
+            }
             
             // Menu a tendina per filtrare per tipo di incongruenza
             ui.horizontal(|ui| {
                 ui.label("Filtra per tipo di incongruenza:");
+                let vecchio_filtro = self.filtro_incongruenza;
                 egui::ComboBox::from_id_source("filtro_incongruenza")
                     .selected_text(self.filtro_incongruenza.display_name())
                     .show_ui(ui, |ui| {
@@ -556,112 +702,27 @@ impl eframe::App for CorrectorApp {
                             ui.selectable_value(&mut self.filtro_incongruenza, filtro, filtro.display_name());
                         }
                     });
+                if vecchio_filtro != self.filtro_incongruenza {
+                    self.filtro_dirty = true;
+                }
             });
             
             ui.separator();
             
             // Checkbox to show all photos (deprecated, mantenuto per compatibilità)
+            let vecchia_mostra_tutte = self.mostra_tutte_foto;
             ui.checkbox(&mut self.mostra_tutte_foto, "Show all photos (including those without incongruities)");
+            if vecchia_mostra_tutte != self.mostra_tutte_foto {
+                self.filtro_dirty = true;
+            }
             
             ui.separator();
             
-            // Photo table - filter based on flags and threshold
-            let soglia_secondi = (self.soglia_gravita_giorni * 86400.0) as i64;
-            let mut foto_da_mostrare: Vec<_> = self.foto_list
-                .iter()
-                .filter(|f| {
-                    // Filtro principale: solo EXIF mancante se abilitato
-                    if self.solo_exif_mancante {
-                        // Mostra solo foto con DateTimeOriginal O CreateDate mancanti
-                        if f.exif_datetime_original.is_some() && f.exif_create_date.is_some() {
-                            return false; // Ha entrambi i campi EXIF, quindi escludi
-                        }
-                    }
-                    
-                    // Filtro per tipo di incongruenza (solo se ci sono incongruenze)
-                    if !f.incongruenze.is_empty() {
-                        if !self.filtro_incongruenza.matches(f) {
-                            return false;
-                        }
-                    } else {
-                        // Se non ci sono incongruenze, mostra solo se:
-                        // - mostra_tutte_foto è true, OPPURE
-                        // - solo_exif_mancante è true (per mostrare quelle con EXIF mancante anche senza incongruenze)
-                        if !self.mostra_tutte_foto && !self.solo_exif_mancante {
-                            return false;
-                        }
-                        // Se solo_exif_mancante è true ma non ci sono incongruenze,
-                        // mostra solo se ha EXIF mancante (già controllato sopra)
-                        if self.solo_exif_mancante {
-                            return true; // Ha EXIF mancante (già verificato sopra)
-                        }
-                    }
-                    
-                    // Se mostra_tutte_foto è true, mostra anche quelle senza incongruenze
-                    if self.mostra_tutte_foto {
-                        if f.incongruenze.is_empty() {
-                            return true; // Mostra anche quelle senza incongruenze
-                        }
-                        // Per quelle con incongruenze, applica il filtro sulla soglia
-                        let gravita_secondi = (f.gravita_incongruenza as f64 * 86400.0) as i64;
-                        gravita_secondi >= soglia_secondi
-                    } else {
-                        // Mostra solo quelle con incongruenze che superano la soglia
-                        if f.incongruenze.is_empty() {
-                            // Se solo_exif_mancante è true, mostra anche quelle con EXIF mancante senza incongruenze
-                            if self.solo_exif_mancante {
-                                return true;
-                            }
-                            return false;
-                        }
-                        // Converti la gravità della foto in secondi per il confronto
-                        let gravita_secondi = (f.gravita_incongruenza as f64 * 86400.0) as i64;
-                        gravita_secondi >= soglia_secondi
-                    }
-                })
-                .cloned()
-                .collect();
-            
-            // Applica ordinamento se selezionato
-            if let Some(colonna) = self.colonna_ordinamento {
-                foto_da_mostrare.sort_by(|a, b| {
-                    let cmp = match colonna {
-                        ColonnaOrdinamento::NomeFile => {
-                            a.nome_file.cmp(&b.nome_file)
-                        }
-                        ColonnaOrdinamento::Gravita => {
-                            a.gravita_incongruenza.cmp(&b.gravita_incongruenza)
-                        }
-                        ColonnaOrdinamento::Incongruenze => {
-                            a.incongruenze.len().cmp(&b.incongruenze.len())
-                        }
-                        ColonnaOrdinamento::DateTimeOriginal => {
-                            match (a.exif_datetime_original, b.exif_datetime_original) {
-                                (Some(dt_a), Some(dt_b)) => dt_a.cmp(&dt_b),
-                                (Some(_), None) => std::cmp::Ordering::Less,
-                                (None, Some(_)) => std::cmp::Ordering::Greater,
-                                (None, None) => std::cmp::Ordering::Equal,
-                            }
-                        }
-                        ColonnaOrdinamento::CreateDate => {
-                            match (a.exif_create_date, b.exif_create_date) {
-                                (Some(dt_a), Some(dt_b)) => dt_a.cmp(&dt_b),
-                                (Some(_), None) => std::cmp::Ordering::Less,
-                                (None, Some(_)) => std::cmp::Ordering::Greater,
-                                (None, None) => std::cmp::Ordering::Equal,
-                            }
-                        }
-                    };
-                    
-                    if self.ordine_crescente {
-                        cmp
-                    } else {
-                        cmp.reverse()
-                    }
-                });
-            }
+            // Calcola la lista filtrata (usa cache se disponibile)
+            self.calcola_foto_da_mostrare();
             
             // Show threshold in selected unit
+            let soglia_secondi = (self.soglia_gravita_giorni * 86400.0) as i64;
             let soglia_display = match self.unita_gravita {
                 UnitaGravita::Secondi => format!("{} seconds", soglia_secondi),
                 UnitaGravita::Minuti => format!("{:.2} minutes", self.soglia_gravita_giorni * 1440.0),
@@ -672,9 +733,9 @@ impl eframe::App for CorrectorApp {
             };
             
             if self.mostra_tutte_foto {
-                ui.label(format!("Photos shown: {} (all, filter >= {} for incongruities)", foto_da_mostrare.len(), soglia_display));
+                ui.label(format!("Photos shown: {} (all, filter >= {} for incongruities)", self.foto_da_mostrare_cached.len(), soglia_display));
             } else {
-                ui.label(format!("Photos with incongruities >= {}: {}", soglia_display, foto_da_mostrare.len()));
+                ui.label(format!("Photos with incongruities >= {}: {}", soglia_display, self.foto_da_mostrare_cached.len()));
             }
             
             ui.label(format!("Selected photos: {}", self.foto_selezionate.len()));
@@ -686,24 +747,18 @@ impl eframe::App for CorrectorApp {
                     .spacing([10.0, 4.0])
                     .show(ui, |ui| {
                         // Header with checkbox "Select all"
-                        let tutte_selezionate = !foto_da_mostrare.is_empty() && 
-                            foto_da_mostrare.iter().all(|foto| {
-                                let idx_originale = self.foto_list.iter()
-                                    .position(|f| f.path == foto.path)
-                                    .unwrap_or(0);
-                                self.foto_selezionate.contains(&idx_originale)
+                        let tutte_selezionate = !self.foto_da_mostrare_cached.is_empty() && 
+                            self.foto_da_mostrare_cached.iter().all(|(idx_originale, _)| {
+                                self.foto_selezionate.contains(idx_originale)
                             });
                         let mut seleziona_tutte = tutte_selezionate;
                         if ui.checkbox(&mut seleziona_tutte, "Select").changed() {
                             // Select/deselect all visible photos
-                            for foto in foto_da_mostrare.iter() {
-                                let idx_originale = self.foto_list.iter()
-                                    .position(|f| f.path == foto.path)
-                                    .unwrap_or(0);
+                            for (idx_originale, _) in self.foto_da_mostrare_cached.iter() {
                                 if seleziona_tutte {
-                                    self.foto_selezionate.insert(idx_originale);
+                                    self.foto_selezionate.insert(*idx_originale);
                                 } else {
-                                    self.foto_selezionate.remove(&idx_originale);
+                                    self.foto_selezionate.remove(idx_originale);
                                 }
                             }
                         }
@@ -715,9 +770,11 @@ impl eframe::App for CorrectorApp {
                         if nome_response.clicked() {
                             if self.colonna_ordinamento == Some(ColonnaOrdinamento::NomeFile) {
                                 self.ordine_crescente = !self.ordine_crescente;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             } else {
                                 self.colonna_ordinamento = Some(ColonnaOrdinamento::NomeFile);
                                 self.ordine_crescente = true;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             }
                         }
                         
@@ -728,9 +785,11 @@ impl eframe::App for CorrectorApp {
                         if gravita_response.clicked() {
                             if self.colonna_ordinamento == Some(ColonnaOrdinamento::Gravita) {
                                 self.ordine_crescente = !self.ordine_crescente;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             } else {
                                 self.colonna_ordinamento = Some(ColonnaOrdinamento::Gravita);
                                 self.ordine_crescente = true;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             }
                         }
                         
@@ -743,9 +802,11 @@ impl eframe::App for CorrectorApp {
                         if inc_header_response.clicked() {
                             if self.colonna_ordinamento == Some(ColonnaOrdinamento::Incongruenze) {
                                 self.ordine_crescente = !self.ordine_crescente;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             } else {
                                 self.colonna_ordinamento = Some(ColonnaOrdinamento::Incongruenze);
                                 self.ordine_crescente = true;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             }
                         }
                         
@@ -756,9 +817,11 @@ impl eframe::App for CorrectorApp {
                         if dt_response.clicked() {
                             if self.colonna_ordinamento == Some(ColonnaOrdinamento::DateTimeOriginal) {
                                 self.ordine_crescente = !self.ordine_crescente;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             } else {
                                 self.colonna_ordinamento = Some(ColonnaOrdinamento::DateTimeOriginal);
                                 self.ordine_crescente = true;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             }
                         }
                         
@@ -771,30 +834,19 @@ impl eframe::App for CorrectorApp {
                         if cd_response.clicked() {
                             if self.colonna_ordinamento == Some(ColonnaOrdinamento::CreateDate) {
                                 self.ordine_crescente = !self.ordine_crescente;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             } else {
                                 self.colonna_ordinamento = Some(ColonnaOrdinamento::CreateDate);
                                 self.ordine_crescente = true;
+                                self.filtro_dirty = true; // Ordinamento cambiato
                             }
                         }
                         
                         ui.label("→ Proposal");
                         ui.end_row();
                         
-                        // Data rows - filtered photos
-                        // Create a list of indices to handle Shift+click
-                        let indici_visibili: Vec<usize> = foto_da_mostrare.iter()
-                            .map(|foto| {
-                                self.foto_list.iter()
-                                    .position(|f| f.path == foto.path)
-                                    .unwrap_or(0)
-                            })
-                            .collect();
-                        
-                        for (idx_grid, foto) in foto_da_mostrare.iter().enumerate() {
-                            // Find original index in complete list
-                            let idx_originale = self.foto_list.iter()
-                                .position(|f| f.path == foto.path)
-                                .unwrap_or(0);
+                        // Data rows - filtered photos (usa cache con indici già calcolati)
+                        for (idx_grid, (idx_originale, foto)) in self.foto_da_mostrare_cached.iter().enumerate() {
                             
                             let mut is_selected = self.foto_selezionate.contains(&idx_originale);
                             
@@ -809,7 +861,9 @@ impl eframe::App for CorrectorApp {
                                 if shift_pressed && self.ultimo_indice_selezionato.is_some() {
                                     // Shift+click: select range
                                     let ultimo_idx = self.ultimo_indice_selezionato.unwrap();
-                                    let start_idx = indici_visibili.iter().position(|&i| i == ultimo_idx).unwrap_or(0);
+                                    let start_idx = self.foto_da_mostrare_cached.iter()
+                                        .position(|(idx, _)| *idx == ultimo_idx)
+                                        .unwrap_or(0);
                                     let end_idx = idx_grid;
                                     let (start, end) = if start_idx < end_idx {
                                         (start_idx, end_idx)
@@ -818,30 +872,30 @@ impl eframe::App for CorrectorApp {
                                     };
                                     
                                     for i in start..=end {
-                                        if let Some(&idx) = indici_visibili.get(i) {
-                                            self.foto_selezionate.insert(idx);
+                                        if let Some((idx, _)) = self.foto_da_mostrare_cached.get(i) {
+                                            self.foto_selezionate.insert(*idx);
                                         }
                                     }
-                                    self.ultimo_indice_selezionato = Some(idx_originale);
+                                    self.ultimo_indice_selezionato = Some(*idx_originale);
                                 } else if ctrl_pressed {
                                     // Ctrl+click: add/remove single photo
                                     if is_selected {
-                                        self.foto_selezionate.insert(idx_originale);
+                                        self.foto_selezionate.insert(*idx_originale);
                                     } else {
-                                        self.foto_selezionate.remove(&idx_originale);
+                                        self.foto_selezionate.remove(idx_originale);
                                     }
-                                    self.ultimo_indice_selezionato = Some(idx_originale);
+                                    self.ultimo_indice_selezionato = Some(*idx_originale);
                                 } else {
                                     // Normal click: select only this photo
                                     self.foto_selezionate.clear();
-                                    self.foto_selezionate.insert(idx_originale);
-                                    self.ultimo_indice_selezionato = Some(idx_originale);
+                                    self.foto_selezionate.insert(*idx_originale);
+                                    self.ultimo_indice_selezionato = Some(*idx_originale);
                                 }
                             } else if is_selected {
                                 // Keep selected state
-                                self.foto_selezionate.insert(idx_originale);
+                                self.foto_selezionate.insert(*idx_originale);
                             } else {
-                                self.foto_selezionate.remove(&idx_originale);
+                                self.foto_selezionate.remove(idx_originale);
                             }
                             
                             // Highlight row if selected

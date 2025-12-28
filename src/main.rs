@@ -334,10 +334,11 @@ pub fn calcola_gravita_incongruenza(foto: &FotoData) -> i64 {
             max_diff_giorni = max_diff_giorni.max(diff);
         }
     } else {
-        // EXIF mancante: considera come incongruenza grave (365 giorni = 1 anno)
-        if foto.anno_nome.is_some() || foto.data_json.is_some() {
-            max_diff_giorni = 365;
-        }
+        // EXIF mancante: non calcolare una differenza di giorni perché non c'è nulla da confrontare
+        // La gravità rimane 0 - l'incongruenza è solo "EXIF mancante", non una differenza temporale
+        // Se ci sono altre incongruenze (es. differenze tra JSON e filename), verranno calcolate sopra
+        // ma se l'EXIF è mancante, non possiamo calcolare una differenza con l'EXIF stesso
+        max_diff_giorni = 0;
     }
     
     max_diff_giorni
