@@ -431,12 +431,21 @@ pub fn leggi_foto_da_directory_con_progresso(directory: &Path, progress_sender: 
     }
     
     // Usa rayon per parallelizzare la lettura con progresso
+    // Per operazioni I/O bound, limitiamo i thread per ridurre competizione disco
+    // Usa max 8 thread invece di tutti i core disponibili
+    let num_threads = std::cmp::min(8, num_cpus::get().max(4));
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build();
+    
     let start = std::time::Instant::now();
     let progress_mutex = std::sync::Arc::new(std::sync::Mutex::new(0usize));
     
-    let foto_list: Vec<FotoData> = foto_files
-        .into_par_iter()
-        .map(|foto_path| {
+    let foto_list: Vec<FotoData> = if let Ok(pool) = pool {
+        pool.install(|| {
+            foto_files
+                .into_par_iter()
+                .map(|foto_path| {
             let result = leggi_foto_singola(foto_path);
             
             // Aggiorna progresso ogni 100 foto
@@ -450,7 +459,28 @@ pub fn leggi_foto_da_directory_con_progresso(directory: &Path, progress_sender: 
             
             result
         })
-        .collect();
+        .collect()
+        })
+    } else {
+        // Fallback: usa il thread pool globale
+        foto_files
+            .into_par_iter()
+            .map(|foto_path| {
+                let result = leggi_foto_singola(foto_path);
+                
+                // Aggiorna progresso ogni 100 foto
+                let mut count = progress_mutex.lock().unwrap();
+                *count += 1;
+                if *count % 100 == 0 || *count == total_files {
+                    if let Some(ref sender) = progress_sender {
+                        let _ = sender.send(*count);
+                    }
+                }
+                
+                result
+            })
+            .collect()
+    };
     let elapsed = start.elapsed();
     eprintln!("[DEBUG] Lettura completata: {} foto elaborate in {:?} ({:.2} foto/sec)", 
               foto_list.len(), elapsed, 

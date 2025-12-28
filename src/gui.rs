@@ -860,28 +860,28 @@ impl eframe::App for CorrectorApp {
             ui.label(format!("Selected photos: {}", self.foto_selezionate.len()));
             ui.separator();
             
-            egui::ScrollArea::both().show(ui, |ui| {
-                egui::Grid::new("foto_grid")
-                    .num_columns(8)
-                    .spacing([10.0, 4.0])
-                    .show(ui, |ui| {
-                        // Header with checkbox "Select all"
-                        let tutte_selezionate = !self.foto_da_mostrare_cached.is_empty() && 
-                            self.foto_da_mostrare_cached.iter().all(|(idx_originale, _)| {
-                                self.foto_selezionate.contains(idx_originale)
-                            });
-                        let mut seleziona_tutte = tutte_selezionate;
-                        if ui.checkbox(&mut seleziona_tutte, "Select").changed() {
-                            // Select/deselect all visible photos
-                            for (idx_originale, _) in self.foto_da_mostrare_cached.iter() {
-                                if seleziona_tutte {
-                                    self.foto_selezionate.insert(*idx_originale);
-                                } else {
-                                    self.foto_selezionate.remove(idx_originale);
-                                }
+            // Renderizza header fuori dalla virtualizzazione
+            egui::Grid::new("foto_grid_header")
+                .num_columns(8)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    // Header with checkbox "Select all"
+                    let tutte_selezionate = !self.foto_da_mostrare_cached.is_empty() && 
+                        self.foto_da_mostrare_cached.iter().all(|(idx_originale, _)| {
+                            self.foto_selezionate.contains(idx_originale)
+                        });
+                    let mut seleziona_tutte = tutte_selezionate;
+                    if ui.checkbox(&mut seleziona_tutte, "Select").changed() {
+                        // Select/deselect all visible photos
+                        for (idx_originale, _) in self.foto_da_mostrare_cached.iter() {
+                            if seleziona_tutte {
+                                self.foto_selezionate.insert(*idx_originale);
+                            } else {
+                                self.foto_selezionate.remove(idx_originale);
                             }
                         }
-                        // Clickable headers for sorting
+                    }
+                    // Clickable headers for sorting
                         let nome_response = ui.selectable_label(
                             self.colonna_ordinamento == Some(ColonnaOrdinamento::NomeFile),
                             "File Name"
@@ -961,11 +961,22 @@ impl eframe::App for CorrectorApp {
                             }
                         }
                         
-                        ui.label("→ Proposal");
-                        ui.end_row();
-                        
-                        // Data rows - filtered photos (usa cache con indici già calcolati)
-                        for (idx_grid, (idx_originale, foto)) in self.foto_da_mostrare_cached.iter().enumerate() {
+                    ui.label("→ Proposal");
+                    ui.end_row();
+                });
+            
+            // Usa virtualizzazione per renderizzare solo le righe visibili
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, 25.0, self.foto_da_mostrare_cached.len(), |ui, row_range| {
+                    egui::Grid::new("foto_grid_rows")
+                        .num_columns(8)
+                        .spacing([10.0, 4.0])
+                        .show(ui, |ui| {
+                            // Renderizza solo le righe nel range visibile
+                            for idx_in_list in row_range {
+                                if let Some((idx_originale, foto)) = self.foto_da_mostrare_cached.get(idx_in_list) {
+                                    let idx_grid = idx_in_list;
                             
                             let mut is_selected = self.foto_selezionate.contains(&idx_originale);
                             
@@ -1166,12 +1177,13 @@ impl eframe::App for CorrectorApp {
                                 ui.label("-");
                             }
                             
-                            // Reset color at end of row
-                            ui.visuals_mut().override_text_color = None;
-                            ui.end_row();
-                        }
-                    });
-            });
+                                    // Reset color at end of row
+                                    ui.visuals_mut().override_text_color = None;
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                });
         });
         
         // Right side panel
